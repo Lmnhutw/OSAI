@@ -3,12 +3,24 @@ from sqlmodel import Session, select
 from typing import List
 import uuid
 
-from ..models import Project, ProjectRequirement
+from ..models import Project, ProjectRequirement, Plan
 from ..schemas import ProjectCreate, ProjectRead, ProjectRequirementCreate, ProjectRequirementRead, PlanRead
 from ..database import get_session
 from ..services.planner_agent import generate_plan_for_project
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+@router.get("", response_model=List[ProjectRead])
+def list_projects(session: Session = Depends(get_session)):
+    projects = session.exec(select(Project).order_by(Project.created_at.desc())).all()
+    return projects
+
+@router.get("/{project_id}", response_model=ProjectRead)
+def get_project(project_id: uuid.UUID, session: Session = Depends(get_session)):
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
 
 @router.post("", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 def create_project(project_in: ProjectCreate, session: Session = Depends(get_session)):
@@ -17,6 +29,18 @@ def create_project(project_in: ProjectCreate, session: Session = Depends(get_ses
     session.commit()
     session.refresh(project)
     return project
+
+@router.get("/{project_id}/requirements", response_model=List[ProjectRequirementRead])
+def list_project_requirements(project_id: uuid.UUID, session: Session = Depends(get_session)):
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    reqs = session.exec(
+        select(ProjectRequirement)
+        .where(ProjectRequirement.project_id == project_id)
+        .order_by(ProjectRequirement.position)
+    ).all()
+    return reqs
 
 @router.post("/{project_id}/requirements", response_model=List[ProjectRequirementRead])
 def add_project_requirements(
@@ -44,6 +68,18 @@ def add_project_requirements(
         
     return new_reqs
 
+@router.get("/{project_id}/plans", response_model=List[PlanRead])
+def list_project_plans(project_id: uuid.UUID, session: Session = Depends(get_session)):
+    project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    plans = session.exec(
+        select(Plan)
+        .where(Plan.project_id == project_id)
+        .order_by(Plan.version.desc())
+    ).all()
+    return plans
+
 @router.post("/{project_id}/plan/generate", response_model=PlanRead)
 def generate_plan(
     project_id: uuid.UUID,
@@ -60,3 +96,4 @@ def generate_plan(
         
     plan = generate_plan_for_project(session, project)
     return plan
+

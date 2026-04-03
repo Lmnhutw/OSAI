@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.api import projects, plans, tasks
+from app.api import projects, plans, tasks, sessions, runs
 
 app = FastAPI(
     title="Python Control Plane API",
@@ -10,6 +10,8 @@ app = FastAPI(
 app.include_router(projects.router)
 app.include_router(plans.router)
 app.include_router(tasks.router)
+app.include_router(sessions.router)
+app.include_router(runs.router)
 
 @app.get("/health")
 def health_check():

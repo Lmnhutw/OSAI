@@ -1,12 +1,57 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from typing import List
+import uuid
 
-from ..models import Task
-from ..schemas import BatchTaskApprove, TaskRead
+from ..models import Task, TaskDependency, TaskSession, ExecutionRun
+from ..schemas import BatchTaskApprove, TaskRead, TaskDependencyRead, TaskSessionRead, ExecutionRunRead
 from ..database import get_session
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+@router.get("/{task_id}", response_model=TaskRead)
+def get_task(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+@router.get("/{task_id}/dependencies", response_model=List[TaskDependencyRead])
+def list_task_dependencies(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    deps = session.exec(
+        select(TaskDependency)
+        .where(TaskDependency.task_id == task_id)
+        .order_by(TaskDependency.created_at)
+    ).all()
+    return deps
+
+@router.get("/{task_id}/sessions", response_model=List[TaskSessionRead])
+def list_task_sessions(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    sessions = session.exec(
+        select(TaskSession)
+        .where(TaskSession.task_id == task_id)
+        .order_by(TaskSession.started_at.desc())
+    ).all()
+    return sessions
+
+@router.get("/{task_id}/runs", response_model=List[ExecutionRunRead])
+def list_task_runs(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    runs = session.exec(
+        select(ExecutionRun)
+        .join(TaskSession, ExecutionRun.task_session_id == TaskSession.id)
+        .where(TaskSession.task_id == task_id)
+        .order_by(ExecutionRun.created_at.desc())
+    ).all()
+    return runs
 
 @router.post("/batch/approve", response_model=List[TaskRead])
 def approve_tasks_batch(
@@ -30,3 +75,4 @@ def approve_tasks_batch(
         session.refresh(task)
         
     return tasks
+
