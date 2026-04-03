@@ -4,8 +4,16 @@ from typing import List
 import uuid
 
 from ..models import Task, TaskDependency, TaskSession, ExecutionRun
-from ..schemas import BatchTaskApprove, TaskRead, TaskDependencyRead, TaskSessionRead, ExecutionRunRead
+from ..schemas import (
+    BatchTaskApprove,
+    DispatchEvaluationRead,
+    ExecutionRunRead,
+    TaskDependencyRead,
+    TaskRead,
+    TaskSessionRead,
+)
 from ..database import get_session
+from ..services.dispatch_evaluator import evaluate_task_dispatch
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -76,3 +84,12 @@ def approve_tasks_batch(
         
     return tasks
 
+@router.post("/{task_id}/evaluate-dispatch", response_model=DispatchEvaluationRead)
+def evaluate_dispatch(
+    task_id: uuid.UUID,
+    session: Session = Depends(get_session)
+):
+    try:
+        return evaluate_task_dispatch(session, task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

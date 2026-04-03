@@ -1,8 +1,7 @@
 import uuid
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
-from pydantic import BaseModel
-from sqlmodel import Field, SQLModel, Column, JSON, String, Integer, Text, DateTime
+from sqlmodel import Field, SQLModel, Column, JSON, Integer, Text, DateTime
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -83,7 +82,7 @@ class TaskSession(SQLModel, table=True):
     task_id: uuid.UUID = Field(foreign_key="tasks.id")
     status: str = Field(default="open", sa_type=Text)
     artifact_path: Optional[str] = Field(default=None, sa_type=Text)
-    metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column('metadata', JSON))
+    session_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
     started_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     ended_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))

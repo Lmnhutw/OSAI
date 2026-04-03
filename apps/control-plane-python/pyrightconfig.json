@@ -1,0 +1,17 @@
+{
+  "include": [
+    "app",
+    "main.py"
+  ],
+  "exclude": [
+    "venv",
+    "**/__pycache__"
+  ],
+  "venvPath": ".",
+  "venv": "venv",
+  "extraPaths": [
+    ".",
+    "./venv/Lib/site-packages"
+  ],
+  "pythonVersion": "3.14"
+}
