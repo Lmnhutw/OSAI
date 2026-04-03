@@ -42,6 +42,7 @@ type FinalizeRunInput struct {
 	TaskStatus    string
 	ArtifactPath  string
 	OutputPayload map[string]any
+	SessionMetadata map[string]any
 	ErrorMessage  string
 	EventType     string
 	EventPayload  map[string]any

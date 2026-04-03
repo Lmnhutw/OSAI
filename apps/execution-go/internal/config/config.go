@@ -49,6 +49,7 @@ type Config struct {
 	JiraAPIToken         string
 	JiraBearerToken      string
 	JiraInProgressStatus string
+	JiraEvaluationStatus string
 	JiraDoneStatus       string
 	JiraFailedStatus     string
 }
@@ -105,6 +106,7 @@ func Load() (Config, error) {
 		JiraAPIToken:         strings.TrimSpace(os.Getenv("EXECUTION_JIRA_API_TOKEN")),
 		JiraBearerToken:      strings.TrimSpace(os.Getenv("EXECUTION_JIRA_BEARER_TOKEN")),
 		JiraInProgressStatus: strings.TrimSpace(os.Getenv("EXECUTION_JIRA_IN_PROGRESS_STATUS")),
+		JiraEvaluationStatus: strings.TrimSpace(os.Getenv("EXECUTION_JIRA_EVALUATION_STATUS")),
 		JiraDoneStatus:       strings.TrimSpace(os.Getenv("EXECUTION_JIRA_DONE_STATUS")),
 		JiraFailedStatus:     strings.TrimSpace(os.Getenv("EXECUTION_JIRA_FAILED_STATUS")),
 	}

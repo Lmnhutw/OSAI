@@ -2,6 +2,7 @@ package artifact
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"execution-go/internal/cli"
+	execresult "execution-go/internal/result"
 )
 
 type Report struct {
@@ -16,6 +18,7 @@ type Report struct {
 	JiraIssueKey       string
 	Goal               string
 	AcceptanceCriteria []string
+	Execution          *execresult.ExecutionResult
 	FilesChanged       []string
 	Commands           []cli.Result
 	Results            []string
@@ -85,6 +88,72 @@ func render(report Report) string {
 
 	builder.WriteString("## Acceptance Criteria\n\n")
 	writeList(&builder, report.AcceptanceCriteria, "- No explicit acceptance criteria were provided.")
+	if report.Execution != nil {
+		builder.WriteString("\n## Execution Result\n\n")
+		builder.WriteString("- Status: ")
+		builder.WriteString(string(report.Execution.Status))
+		builder.WriteString("\n")
+		builder.WriteString("- Confidence: ")
+		builder.WriteString(string(report.Execution.Confidence.Level))
+		builder.WriteString(" (")
+		builder.WriteString(fmt.Sprintf("%.2f", report.Execution.Confidence.Score))
+		builder.WriteString(")\n")
+		builder.WriteString("- Attempts: ")
+		builder.WriteString(fmt.Sprintf("%d", report.Execution.AttemptCount))
+		builder.WriteString("\n")
+		builder.WriteString("- Evaluation State: ")
+		builder.WriteString(fallback(report.Execution.Evaluation.State, "unknown"))
+		builder.WriteString("\n")
+		if strings.TrimSpace(string(report.Execution.FailureClassification)) != "" {
+			builder.WriteString("- Failure Classification: ")
+			builder.WriteString(string(report.Execution.FailureClassification))
+			builder.WriteString("\n")
+		}
+		if strings.TrimSpace(report.Execution.FailureReason) != "" {
+			builder.WriteString("- Failure Reason: ")
+			builder.WriteString(report.Execution.FailureReason)
+			builder.WriteString("\n")
+		}
+
+		builder.WriteString("\n## Reasoning Summary\n\n")
+		builder.WriteString(fallback(report.Execution.ReasoningSummary, "No reasoning summary was recorded."))
+		builder.WriteString("\n")
+
+		builder.WriteString("\n## Confidence Signals\n\n")
+		writeList(&builder, report.Execution.Confidence.Signals, "- No confidence signals were recorded.")
+
+		builder.WriteString("\n## Detected Anomalies\n\n")
+		writeList(&builder, report.Execution.DetectedAnomalies, "- No anomalies were detected.")
+
+		builder.WriteString("\n## Retry Guidance\n\n")
+		retryLines := []string{
+			fmt.Sprintf("Eligible: %t", report.Execution.Retry.Eligible),
+			fmt.Sprintf("Remaining attempts: %d", report.Execution.Retry.Remaining),
+			fmt.Sprintf("Max attempts: %d", report.Execution.Retry.MaxAttempts),
+		}
+		if strings.TrimSpace(report.Execution.Retry.Reason) != "" {
+			retryLines = append(retryLines, "Reason: "+report.Execution.Retry.Reason)
+		}
+		if report.Execution.Retry.RepeatedFailurePattern {
+			retryLines = append(retryLines, "Repeated failure pattern detected.")
+		}
+		retryLines = append(retryLines, report.Execution.Retry.Suggestions...)
+		writeList(&builder, retryLines, "- No retry guidance was recorded.")
+
+		builder.WriteString("\n## Validation Summary\n\n")
+		validationLines := []string{
+			fmt.Sprintf("Total commands: %d", report.Execution.Validation.Total),
+			fmt.Sprintf("Passed: %d", report.Execution.Validation.Passed),
+			fmt.Sprintf("Failed: %d", report.Execution.Validation.Failed),
+			fmt.Sprintf("Lint passed: %d/%d", report.Execution.Validation.LintPassed, report.Execution.Validation.LintTotal),
+			fmt.Sprintf("Tests passed: %d/%d", report.Execution.Validation.TestPassed, report.Execution.Validation.TestTotal),
+		}
+		writeList(&builder, validationLines, "- No validation summary was recorded.")
+
+		builder.WriteString("\n## Structured JSON Result\n\n```json\n")
+		builder.WriteString(renderJSON(report.Execution))
+		builder.WriteString("\n```\n")
+	}
 	builder.WriteString("\n## Files Changed\n\n")
 	writeList(&builder, report.FilesChanged, "- No tracked file changes were detected.")
 	builder.WriteString("\n## Commands Run\n\n")
@@ -192,4 +261,12 @@ func trimOutput(value string) string {
 		return value
 	}
 	return value[:max] + "\n...[truncated]"
+}
+
+func renderJSON(value any) string {
+	payload, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(payload)
 }

@@ -1,6 +1,6 @@
 # execution-go
 
-`execution-go` is the execution worker for the monorepo orchestration system. It polls Jira for issues labeled `ready-for-codex`, claims matching tasks from PostgreSQL, prepares an isolated git workspace, runs Codex plus validation commands, writes a markdown artifact into `artifacts/`, persists execution state into `task_sessions` and `execution_runs`, and syncs Jira transitions.
+`execution-go` is the execution worker for the monorepo orchestration system. It polls Jira for issues labeled `ready-for-codex`, claims matching tasks from PostgreSQL, prepares an isolated git workspace, runs Codex plus validation commands, writes a markdown artifact into `artifacts/`, persists execution state into `task_sessions` and `execution_runs`, and syncs Jira transitions plus execution comments.
 
 ## Structure
 
@@ -40,6 +40,7 @@ apps/execution-go/
 - `EXECUTION_CODEX_ARGS`
 - `EXECUTION_CODEX_PROMPT_MODE`
 - `EXECUTION_JIRA_IN_PROGRESS_STATUS`
+- `EXECUTION_JIRA_EVALUATION_STATUS`
 - `EXECUTION_JIRA_DONE_STATUS`
 - `EXECUTION_JIRA_FAILED_STATUS`
 
@@ -51,3 +52,5 @@ apps/execution-go/
 - The worker looks for the issue key in `jira_issue_key`, `jira.issue_key`, `jira.issueKey`, or `jira.key`.
 - Default repository source is the current monorepo root, so the worker can clone a local checkout unless a task payload or env var overrides it.
 - Lint/test commands should be provided per task payload or through environment defaults. The worker fails explicitly if neither lint nor test commands are configured.
+- Terminal task/session state is now `evaluation_ready`; the worker stores structured execution evidence and leaves final outcome decisions to the result evaluator.
+- Execution runs capture richer structured output including confidence, anomalies, failure classification, retry guidance, and validation summaries.

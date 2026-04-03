@@ -14,6 +14,7 @@ import (
 	"execution-go/internal/config"
 	"execution-go/internal/jira"
 	"execution-go/internal/prompt"
+	execresult "execution-go/internal/result"
 	"execution-go/internal/runner"
 	"execution-go/internal/store"
 	"execution-go/internal/workspace"
@@ -22,6 +23,7 @@ import (
 type JiraClient interface {
 	SearchReadyIssues(ctx context.Context, maxResults int) ([]jira.Issue, error)
 	TransitionIssue(ctx context.Context, issueKey, targetStatus string) error
+	AddComment(ctx context.Context, issueKey, body string) error
 }
 
 type WorkspaceManager interface {
@@ -163,11 +165,30 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	}
 	commands := make([]cli.Result, 0, 16)
 
-	s.tryTransition(ctx, issue.Key, s.cfg.JiraInProgressStatus, &findings)
+	_ = s.tryTransition(ctx, issue.Key, s.cfg.JiraInProgressStatus, &findings)
 
 	if len(spec.LintCommands) == 0 && len(spec.TestCommands) == 0 {
-		findings = append(findings, "No lint/test commands were configured for this task.")
-		return s.finalizeFailure(ctx, issue, claimed, spec, claimed.RunID, commands, results, findings, decisions, nil, nil, "No lint/test commands were configured for this task.")
+		errMessage := "No lint/test commands were configured for this task."
+		findings = append(findings, errMessage)
+		return s.finalizeTerminal(
+			ctx,
+			issue,
+			claimed,
+			spec,
+			claimed.RunID,
+			commands,
+			results,
+			findings,
+			decisions,
+			nil,
+			nil,
+			execresult.StatusFailed,
+			execresult.FailureClassificationConfigurationError,
+			errMessage,
+			execresult.ValidationSummary{},
+			nil,
+			nil,
+		)
 	}
 
 	ws, workspaceCommands, err := s.workspace.Prepare(ctx, workspace.PrepareRequest{
@@ -180,8 +201,27 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	})
 	commands = append(commands, workspaceCommands...)
 	if err != nil {
-		findings = append(findings, "Workspace preparation failed: "+err.Error())
-		return s.finalizeFailure(ctx, issue, claimed, spec, claimed.RunID, commands, results, findings, decisions, nil, nil, err.Error())
+		errMessage := "Workspace preparation failed: " + err.Error()
+		findings = append(findings, errMessage)
+		return s.finalizeTerminal(
+			ctx,
+			issue,
+			claimed,
+			spec,
+			claimed.RunID,
+			commands,
+			results,
+			findings,
+			decisions,
+			nil,
+			nil,
+			execresult.StatusFailed,
+			execresult.FailureClassificationWorkspaceFailure,
+			errMessage,
+			execresult.ValidationSummary{},
+			nil,
+			nil,
+		)
 	}
 
 	decisions = append(decisions, "Workspace path: "+ws.Path)
@@ -198,11 +238,15 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	var lastPromptFile string
 	retryContext := make([]string, 0, 8)
 	var changedFiles []string
-	var finalError string
+	attempts := make([]attemptOutcome, 0, s.cfg.MaxAttempts)
+	failureFingerprints := make(map[string]int, s.cfg.MaxAttempts)
+	terminalStatus := execresult.StatusSucceeded
+	terminalFailureReason := ""
+	terminalFailureClassification := execresult.FailureClassificationNone
+	terminalValidation := execresult.ValidationSummary{}
+	terminalAnomalies := make([]string, 0, 4)
 
 	for {
-		finalError = ""
-
 		promptText := prompt.Build(prompt.Input{
 			TaskID:                  spec.TaskID,
 			JiraIssueKey:            spec.JiraIssueKey,
@@ -229,54 +273,75 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 		if promptFile != "" {
 			decisions = append(decisions, fmt.Sprintf("Attempt %d prompt file: %s", currentAttempt, promptFile))
 		}
-		if runErr == nil {
+		if strings.TrimSpace(codexResult.CommandLine) != "" {
 			commands = append(commands, codexResult)
-		}
-
-		attemptFailures := make([]string, 0, 4)
-		if runErr != nil {
-			attemptFailures = append(attemptFailures, fmt.Sprintf("Attempt %d failed before Codex execution: %v", currentAttempt, runErr))
-		} else if !codexResult.Success() {
-			attemptFailures = append(attemptFailures, summarizeCommandFailure(codexResult))
 		}
 
 		qualityResults := s.quality.RunAll(ctx, execDir, spec.LintCommands, spec.TestCommands)
 		commands = append(commands, qualityResults...)
-		for _, result := range qualityResults {
-			if !result.Success() {
-				attemptFailures = append(attemptFailures, summarizeCommandFailure(result))
-			}
+		outcome := summarizeAttemptOutcome(currentAttempt, s.cfg.MaxAttempts, codexResult, runErr, qualityResults, failureFingerprints)
+		attempts = append(attempts, outcome)
+		terminalStatus = outcome.Status
+		terminalValidation = outcome.Validation
+		terminalFailureReason = outcome.FailureReason
+		terminalFailureClassification = outcome.FailureClassification
+		terminalAnomalies = dedupe(append(terminalAnomalies, outcome.Anomalies...))
+
+		if outcome.FailureFingerprint != "" {
+			failureFingerprints[outcome.FailureFingerprint]++
 		}
 
-		if len(attemptFailures) == 0 {
+		if outcome.FailureReason == "" {
 			results = append(results, fmt.Sprintf("Attempt %d succeeded.", currentAttempt))
 			break
 		}
 
-		finalError = strings.Join(attemptFailures, "; ")
-		findings = append(findings, attemptFailures...)
-		results = append(results, fmt.Sprintf("Attempt %d failed.", currentAttempt))
+		findings = append(findings, outcome.FailureReason)
+		findings = append(findings, outcome.Anomalies...)
+		results = append(results, outcome.Summary)
+		retryContext = append(retryContext, outcome.FailureReason)
 
-		if currentAttempt >= s.cfg.MaxAttempts {
+		if outcome.RepeatedFailurePattern {
+			decisions = append(decisions, fmt.Sprintf("Stopped automatic retries after attempt %d because the failure pattern repeated.", currentAttempt))
+		}
+
+		if !outcome.RetryEligible {
 			break
 		}
 
+		intermediateResult := buildTerminalExecutionResult(
+			spec,
+			outcome.Status,
+			outcome.FailureClassification,
+			outcome.FailureReason,
+			outcome.Validation,
+			attempts,
+			outcome.Anomalies,
+			nil,
+			lastPromptFile,
+			s.cfg.MaxAttempts,
+		)
+		intermediateResult.Evaluation = execresult.EvaluationHandoff{
+			Ready:               false,
+			State:               "retry_scheduled",
+			FinalOutcomeDecided: false,
+		}
+		intermediateResult.Retry.Eligible = true
+		intermediateResult.Retry.Remaining = max(0, s.cfg.MaxAttempts-currentAttempt)
+		intermediateResult.Retry.MaxAttempts = s.cfg.MaxAttempts
+
 		if err := s.store.FinalizeRun(ctx, store.FinalizeRunInput{
-			PlanID:    claimed.Task.PlanID,
-			TaskID:    claimed.Task.ID,
-			SessionID: claimed.SessionID,
-			RunID:     currentRunID,
-			RunStatus: "failed",
-			OutputPayload: map[string]any{
-				"attempt_no":  currentAttempt,
-				"status":      "retrying",
-				"prompt_file": lastPromptFile,
-			},
-			ErrorMessage: finalError,
-			EventType:    "execution_run_failed",
+			PlanID:        claimed.Task.PlanID,
+			TaskID:        claimed.Task.ID,
+			SessionID:     claimed.SessionID,
+			RunID:         currentRunID,
+			RunStatus:     string(outcome.Status),
+			OutputPayload: buildIntermediateRunPayload(intermediateResult, spec.JiraIssueKey),
+			ErrorMessage:  outcome.FailureReason,
+			EventType:     "execution_run_retryable_failure",
 			EventPayload: map[string]any{
-				"attempt_no": currentAttempt,
-				"errors":     attemptFailures,
+				"attempt_no":       currentAttempt,
+				"execution_result": intermediateResult,
 			},
 		}); err != nil {
 			return fmt.Errorf("record failed attempt %d: %w", currentAttempt, err)
@@ -285,11 +350,11 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 		retryRun, err := s.store.StartRetryRun(ctx, claimed.Task.PlanID, claimed.Task.ID, claimed.SessionID, claimed.WorkerName, claimed.Task.InputPayload)
 		if err != nil {
 			findings = append(findings, "Retry allocation failed: "+err.Error())
-			finalError = finalError + "; retry allocation failed: " + err.Error()
+			terminalFailureReason = strings.TrimSpace(terminalFailureReason + "; retry allocation failed: " + err.Error())
+			terminalStatus = execresult.StatusFailed
 			break
 		}
 
-		retryContext = append(retryContext, attemptFailures...)
 		currentRunID = retryRun.RunID
 		currentAttempt = retryRun.AttemptNo
 		results = append(results, fmt.Sprintf("Retry attempt %d started.", currentAttempt))
@@ -302,124 +367,156 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	if changedFilesResult.Success() {
 		changedFiles = changedFilesResultFiles
 	} else if changedFilesResult.CommandLine != "" {
-		findings = append(findings, "Failed to collect changed files: "+summarizeCommandFailure(changedFilesResult))
+		message := "Failed to collect changed files: " + summarizeCommandFailure(changedFilesResult)
+		findings = append(findings, message)
+		terminalAnomalies = append(terminalAnomalies, "changed_files_collection_failed")
 	}
 
-	if finalError != "" {
-		return s.finalizeFailure(ctx, issue, claimed, spec, currentRunID, commands, results, findings, decisions, changedFiles, &lastPromptFile, finalError)
+	if terminalStatus == execresult.StatusSucceeded && len(changedFiles) == 0 {
+		terminalAnomalies = append(terminalAnomalies, "no_tracked_file_changes")
 	}
+	terminalAnomalies = dedupe(terminalAnomalies)
 
-	results = append(results, "Codex completed successfully and all validation commands passed.")
-	return s.finalizeSuccess(ctx, issue, claimed, spec, currentRunID, commands, results, findings, decisions, changedFiles, &lastPromptFile)
-}
-
-func (s *Service) finalizeSuccess(
-	ctx context.Context,
-	issue jira.Issue,
-	claimed *store.ClaimedTask,
-	spec ExecutionSpec,
-	runID string,
-	commands []cli.Result,
-	results []string,
-	findings []string,
-	decisions []string,
-	changedFiles []string,
-	promptFile *string,
-) error {
-	artifactRecord, err := s.writeArtifact(ctx, issue, spec, commands, results, findings, decisions, changedFiles)
-	if err != nil {
-		findings = append(findings, "Artifact write failed: "+err.Error())
-		results = append(results, "Artifact write failed.")
-		return s.finalizeFailure(ctx, issue, claimed, spec, runID, commands, results, findings, decisions, changedFiles, promptFile, err.Error())
-	}
-
-	outputPayload := map[string]any{
-		"status":         "completed",
-		"jira_issue_key": spec.JiraIssueKey,
-		"artifact_path":  artifactRecord.RelativePath,
-		"files_changed":  changedFiles,
-	}
-	if promptFile != nil && strings.TrimSpace(*promptFile) != "" {
-		outputPayload["prompt_file"] = *promptFile
-	}
-
-	if err := s.store.FinalizeRun(ctx, store.FinalizeRunInput{
-		PlanID:        claimed.Task.PlanID,
-		TaskID:        claimed.Task.ID,
-		SessionID:     claimed.SessionID,
-		RunID:         runID,
-		RunStatus:     "succeeded",
-		SessionStatus: "completed",
-		TaskStatus:    "completed",
-		ArtifactPath:  artifactRecord.RelativePath,
-		OutputPayload: outputPayload,
-		EventType:     "task_completed",
-		EventPayload: map[string]any{
-			"files_changed": changedFiles,
-		},
-	}); err != nil {
-		return fmt.Errorf("finalize successful task: %w", err)
-	}
-
-	s.tryTransition(ctx, issue.Key, s.cfg.JiraDoneStatus, nil)
-	return nil
-}
-
-func (s *Service) finalizeFailure(
-	ctx context.Context,
-	issue jira.Issue,
-	claimed *store.ClaimedTask,
-	spec ExecutionSpec,
-	runID string,
-	commands []cli.Result,
-	results []string,
-	findings []string,
-	decisions []string,
-	changedFiles []string,
-	promptFile *string,
-	errMessage string,
-) error {
-	results = append(results, "Execution finished in a failed state.")
-
-	artifactPath := ""
-	artifactRecord, err := s.writeArtifact(ctx, issue, spec, commands, results, findings, decisions, changedFiles)
-	if err == nil {
-		artifactPath = artifactRecord.RelativePath
+	if terminalFailureReason == "" {
+		results = append(results, "Codex completed successfully and all validation commands passed.")
 	} else {
-		s.logger.Error("failed to write failure artifact", "task_id", claimed.Task.ID, "error", err)
+		results = append(results, "Execution completed and is ready for result evaluation.")
 	}
 
-	outputPayload := map[string]any{
-		"status":         "failed",
-		"jira_issue_key": spec.JiraIssueKey,
-		"artifact_path":  artifactPath,
-		"files_changed":  changedFiles,
+	return s.finalizeTerminal(
+		ctx,
+		issue,
+		claimed,
+		spec,
+		currentRunID,
+		commands,
+		results,
+		findings,
+		decisions,
+		changedFiles,
+		&lastPromptFile,
+		terminalStatus,
+		terminalFailureClassification,
+		terminalFailureReason,
+		terminalValidation,
+		attempts,
+		terminalAnomalies,
+	)
+}
+
+func (s *Service) finalizeTerminal(
+	ctx context.Context,
+	issue jira.Issue,
+	claimed *store.ClaimedTask,
+	spec ExecutionSpec,
+	runID string,
+	commands []cli.Result,
+	results []string,
+	findings []string,
+	decisions []string,
+	changedFiles []string,
+	promptFile *string,
+	status execresult.Status,
+	failureClassification execresult.FailureClassification,
+	failureReason string,
+	validation execresult.ValidationSummary,
+	attempts []attemptOutcome,
+	anomalies []string,
+) error {
+	promptPath := ""
+	if promptFile != nil {
+		promptPath = strings.TrimSpace(*promptFile)
 	}
-	if promptFile != nil && strings.TrimSpace(*promptFile) != "" {
-		outputPayload["prompt_file"] = *promptFile
+
+	preArtifactResult := buildTerminalExecutionResult(
+		spec,
+		status,
+		failureClassification,
+		failureReason,
+		validation,
+		attempts,
+		anomalies,
+		changedFiles,
+		promptPath,
+		s.cfg.MaxAttempts,
+	)
+
+	if err := s.tryComment(ctx, issue.Key, buildJiraComment(preArtifactResult)); err != nil {
+		findings = append(findings, "Failed to add Jira execution comment: "+err.Error())
+		anomalies = append(anomalies, "jira_comment_failed")
+	}
+
+	if err := s.tryTransition(ctx, issue.Key, s.cfg.JiraEvaluationStatus, &findings); err != nil {
+		anomalies = append(anomalies, "jira_transition_failed")
+	}
+
+	finalResult := buildTerminalExecutionResult(
+		spec,
+		status,
+		failureClassification,
+		failureReason,
+		validation,
+		attempts,
+		anomalies,
+		changedFiles,
+		promptPath,
+		s.cfg.MaxAttempts,
+	)
+	results = append(results, finalResult.Summary)
+
+	artifactRecord, err := s.writeArtifact(ctx, issue, spec, commands, results, findings, decisions, changedFiles, finalResult)
+	if err != nil {
+		s.logger.Error("failed to write artifact", "task_id", claimed.Task.ID, "error", err)
+		findings = append(findings, "Artifact write failed: "+err.Error())
+		anomalies = append(anomalies, "artifact_write_failed")
+		if finalResult.Status == execresult.StatusSucceeded {
+			finalResult.Status = execresult.StatusPartialSuccess
+		}
+		finalResult = buildTerminalExecutionResult(
+			spec,
+			finalResult.Status,
+			failureClassification,
+			failureReason,
+			validation,
+			attempts,
+			anomalies,
+			changedFiles,
+			promptPath,
+			s.cfg.MaxAttempts,
+		)
+	} else {
+		finalResult.ArtifactPath = artifactRecord.RelativePath
+	}
+
+	errorMessage := ""
+	if finalResult.HasFailure() {
+		errorMessage = finalResult.FailureReason
 	}
 
 	if err := s.store.FinalizeRun(ctx, store.FinalizeRunInput{
-		PlanID:        claimed.Task.PlanID,
-		TaskID:        claimed.Task.ID,
-		SessionID:     claimed.SessionID,
-		RunID:         runID,
-		RunStatus:     "failed",
-		SessionStatus: "failed",
-		TaskStatus:    "failed",
-		ArtifactPath:  artifactPath,
-		OutputPayload: outputPayload,
-		ErrorMessage:  errMessage,
-		EventType:     "task_failed",
+		PlanID:          claimed.Task.PlanID,
+		TaskID:          claimed.Task.ID,
+		SessionID:       claimed.SessionID,
+		RunID:           runID,
+		RunStatus:       string(finalResult.Status),
+		SessionStatus:   evaluationReadyState,
+		TaskStatus:      evaluationReadyState,
+		ArtifactPath:    finalResult.ArtifactPath,
+		OutputPayload:   buildTerminalRunPayload(finalResult),
+		SessionMetadata: buildSessionMetadata(finalResult),
+		ErrorMessage:    errorMessage,
+		EventType:       evaluationReadyEventType,
 		EventPayload: map[string]any{
-			"error":         errMessage,
-			"files_changed": changedFiles,
+			"status":           string(finalResult.Status),
+			"jira_issue_key":   finalResult.JiraIssueKey,
+			"artifact_path":    finalResult.ArtifactPath,
+			"files_changed":    finalResult.FilesChanged,
+			"execution_result": finalResult,
 		},
 	}); err != nil {
-		return fmt.Errorf("finalize failed task: %w", err)
+		return fmt.Errorf("finalize execution result: %w", err)
 	}
 
-	s.tryTransition(ctx, issue.Key, s.cfg.JiraFailedStatus, nil)
 	return nil
 }
 
@@ -432,12 +529,14 @@ func (s *Service) writeArtifact(
 	findings []string,
 	decisions []string,
 	changedFiles []string,
+	executionResult execresult.ExecutionResult,
 ) (artifact.Artifact, error) {
 	return s.artifact.Write(ctx, artifact.Report{
 		TaskID:             spec.TaskID,
 		JiraIssueKey:       issue.Key,
 		Goal:               spec.Goal,
 		AcceptanceCriteria: spec.AcceptanceCriteria,
+		Execution:          &executionResult,
 		FilesChanged:       changedFiles,
 		Commands:           commands,
 		Results:            dedupe(results),
@@ -446,9 +545,9 @@ func (s *Service) writeArtifact(
 	})
 }
 
-func (s *Service) tryTransition(ctx context.Context, issueKey, targetStatus string, findings *[]string) {
+func (s *Service) tryTransition(ctx context.Context, issueKey, targetStatus string, findings *[]string) error {
 	if strings.TrimSpace(targetStatus) == "" {
-		return
+		return nil
 	}
 
 	transitionCtx, cancel := context.WithTimeout(ctx, s.cfg.JiraRequestTimeout)
@@ -459,7 +558,49 @@ func (s *Service) tryTransition(ctx context.Context, issueKey, targetStatus stri
 		if findings != nil {
 			*findings = append(*findings, fmt.Sprintf("Failed to transition Jira issue %s to %s: %v", issueKey, targetStatus, err))
 		}
+		return err
 	}
+	return nil
+}
+
+func (s *Service) tryComment(ctx context.Context, issueKey, body string) error {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return nil
+	}
+
+	commentCtx, cancel := context.WithTimeout(ctx, s.cfg.JiraRequestTimeout)
+	defer cancel()
+
+	return s.jira.AddComment(commentCtx, issueKey, body)
+}
+
+func buildJiraComment(result execresult.ExecutionResult) string {
+	lines := []string{
+		"Execution update",
+		fmt.Sprintf("Summary: %s", result.Summary),
+		fmt.Sprintf("Status: %s", result.Status),
+		fmt.Sprintf("Confidence: %s (%.2f)", result.Confidence.Level, result.Confidence.Score),
+		fmt.Sprintf("Validation: %d/%d commands passed, %d/%d tests passed", result.Validation.Passed, result.Validation.Total, result.Validation.TestPassed, result.Validation.TestTotal),
+	}
+
+	if len(result.FilesChanged) > 0 {
+		lines = append(lines, "Files changed:")
+		for _, path := range result.FilesChanged {
+			lines = append(lines, "- "+path)
+		}
+	}
+
+	if strings.TrimSpace(result.FailureReason) != "" {
+		lines = append(lines, "Failure reason: "+result.FailureReason)
+	}
+
+	if len(result.DetectedAnomalies) > 0 {
+		lines = append(lines, "Detected anomalies: "+strings.Join(result.DetectedAnomalies, ", "))
+	}
+
+	lines = append(lines, "Execution is ready for result evaluation.")
+	return strings.Join(lines, "\n")
 }
 
 func summarizeCommandFailure(result cli.Result) string {

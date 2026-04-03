@@ -128,6 +128,19 @@ func (c *Client) TransitionIssue(ctx context.Context, issueKey, targetStatus str
 	return c.doJSON(ctx, http.MethodPost, transitionsURL, body, nil)
 }
 
+func (c *Client) AddComment(ctx context.Context, issueKey, body string) error {
+	issueKey = strings.TrimSpace(issueKey)
+	body = strings.TrimSpace(body)
+	if issueKey == "" || body == "" {
+		return nil
+	}
+
+	commentURL := fmt.Sprintf("%s/rest/api/3/issue/%s/comment", c.baseURL, url.PathEscape(issueKey))
+	return c.doJSON(ctx, http.MethodPost, commentURL, map[string]any{
+		"body": adfDocument(body),
+	}, nil)
+}
+
 func (c *Client) doJSON(ctx context.Context, method, endpoint string, body any, target any) error {
 	var reader io.Reader
 	if body != nil {
@@ -178,4 +191,57 @@ func (c *Client) doJSON(ctx context.Context, method, endpoint string, body any, 
 	}
 
 	return nil
+}
+
+func adfDocument(body string) map[string]any {
+	blocks := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n\n")
+	content := make([]map[string]any, 0, len(blocks))
+
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+
+		paragraphContent := make([]map[string]any, 0, 8)
+		for index, line := range strings.Split(block, "\n") {
+			line = strings.TrimRight(line, " ")
+			if line == "" {
+				continue
+			}
+			if index > 0 {
+				paragraphContent = append(paragraphContent, map[string]any{"type": "hardBreak"})
+			}
+			paragraphContent = append(paragraphContent, map[string]any{
+				"type": "text",
+				"text": line,
+			})
+		}
+		if len(paragraphContent) == 0 {
+			continue
+		}
+
+		content = append(content, map[string]any{
+			"type":    "paragraph",
+			"content": paragraphContent,
+		})
+	}
+
+	if len(content) == 0 {
+		content = append(content, map[string]any{
+			"type": "paragraph",
+			"content": []map[string]any{
+				{
+					"type": "text",
+					"text": body,
+				},
+			},
+		})
+	}
+
+	return map[string]any{
+		"type":    "doc",
+		"version": 1,
+		"content": content,
+	}
 }

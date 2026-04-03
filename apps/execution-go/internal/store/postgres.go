@@ -199,10 +199,11 @@ WHERE id = $1::uuid
 UPDATE task_sessions
 SET status = $2,
     artifact_path = NULLIF($3, ''),
+    metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
     ended_at = NOW(),
     updated_at = NOW()
 WHERE id = $1::uuid
-`, input.SessionID, input.SessionStatus, input.ArtifactPath)
+`, input.SessionID, input.SessionStatus, input.ArtifactPath, marshalJSON(input.SessionMetadata))
 		if err != nil {
 			return fmt.Errorf("update task session: %w", err)
 		}
