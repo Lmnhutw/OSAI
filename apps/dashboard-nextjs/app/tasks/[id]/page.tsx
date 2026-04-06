@@ -3,34 +3,46 @@ import { notFound } from "next/navigation";
 
 import { TaskApprovalForm } from "@/components/approval-forms";
 import { CollapsibleLog } from "@/components/collapsible-log";
+import { ExecutionFlowTimeline } from "@/components/execution-flow-timeline";
 import { EventTimeline } from "@/components/event-timeline";
 import { KeyValueGrid } from "@/components/key-value-grid";
+import { TaskMemoryPanel } from "@/components/memory-panels";
 import { PageHeader } from "@/components/page-header";
 import { ResourceNotice } from "@/components/resource-notice";
 import { RunsTable } from "@/components/runs-table";
 import { SectionPanel } from "@/components/section-panel";
 import { StatusBadge } from "@/components/status-badge";
+import { TaskDispatchPanel } from "@/components/task-dispatch-panel";
 import {
   emptyResource,
   getPlan,
   getTask,
+  getTaskMemory,
+  listRunEvents,
   listSessionEvents,
   listTaskDependencies,
   listTaskRuns,
   listTaskSessions
 } from "@/lib/api/control-plane";
+import {
+  buildExecutionFlow,
+  getQADecision,
+  getResultEvaluation,
+  getReviewerDecision
+} from "@/lib/intelligence";
 import { formatDateTime, formatJson } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 interface TaskDetailPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
-  const task = await getTask(params.id);
+  const { id } = await params;
+  const task = await getTask(id);
 
   if (task.state === "not_found") {
     notFound();
@@ -44,19 +56,56 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
         listTaskRuns(task.data.id)
       ])
     : [
-        emptyResource(null, `/plans/${params.id}`),
-        emptyResource([], `/tasks/${params.id}/dependencies`),
-        emptyResource([], `/tasks/${params.id}/sessions`),
-        emptyResource([], `/tasks/${params.id}/runs`)
+        emptyResource(null, `/plans/${id}`),
+        emptyResource([], `/tasks/${id}/dependencies`),
+        emptyResource([], `/tasks/${id}/sessions`),
+        emptyResource([], `/tasks/${id}/runs`)
       ];
 
   const sortedSessions = [...sessions.data].sort((left, right) =>
     right.started_at.localeCompare(left.started_at)
   );
   const latestSession = sortedSessions[0] ?? null;
+  const sortedRuns = [...runs.data].sort((left, right) =>
+    (right.started_at || right.created_at).localeCompare(left.started_at || left.created_at)
+  );
+  const latestRun = sortedRuns[0] ?? null;
   const sessionEvents = latestSession
     ? await listSessionEvents(latestSession.id)
-    : emptyResource([], `/sessions/${params.id}/events`);
+    : emptyResource([], `/sessions/${id}/events`);
+  const latestRunEvents = latestRun
+    ? await listRunEvents(latestRun.id)
+    : emptyResource([], `/runs/${id}/events`);
+  const taskMemory = task.data
+    ? await getTaskMemory(task.data.id)
+    : emptyResource(
+        {
+          task_id: id,
+          project_id: plan.data?.project_id || "",
+          summary: "No curated task memory exists yet.",
+          entries: [],
+          generated_at: null,
+          source_event_id: null
+        },
+        `/memory/task/${id}`
+      );
+
+  const latestResultEvaluation = getResultEvaluation(latestRunEvents.data);
+  const latestReviewerDecision =
+    getReviewerDecision(latestRunEvents.data) || latestResultEvaluation?.reviewer_decision || null;
+  const latestQADecision =
+    getQADecision(latestRunEvents.data) || latestResultEvaluation?.qa_decision || null;
+  const flowItems = task.data
+    ? buildExecutionFlow(
+        task.data,
+        sessions.data,
+        runs.data,
+        null,
+        latestResultEvaluation,
+        latestReviewerDecision,
+        latestQADecision
+      )
+    : [];
 
   return (
     <div className="space-y-6">
@@ -82,7 +131,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
         }
       />
 
-      <ResourceNotice resources={[task, plan, dependencies, sessions, runs, sessionEvents]} />
+      <ResourceNotice
+        resources={[task, plan, dependencies, sessions, runs, sessionEvents, latestRunEvents, taskMemory]}
+      />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
@@ -96,7 +147,7 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
                   label: "Task ID",
                   value: (
                     <span className="font-mono text-sm text-[rgb(var(--ink-strong))]">
-                      {task.data?.id || params.id}
+                      {task.data?.id || id}
                     </span>
                   )
                 },
@@ -145,11 +196,31 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
           </SectionPanel>
 
           <SectionPanel
+            title="Dispatch evaluation"
+            description="Invoke the control-plane evaluator to inspect readiness, policy gates, risk, and missing context."
+          >
+            {task.data ? (
+              <TaskDispatchPanel
+                taskId={task.data.id}
+                planId={task.data.plan_id}
+                projectId={plan.data?.project_id}
+              />
+            ) : null}
+          </SectionPanel>
+
+          <SectionPanel
+            title="Task flow"
+            description="State transitions, execution history, and retry loops across sessions and runs."
+          >
+            <ExecutionFlowTimeline items={flowItems} />
+          </SectionPanel>
+
+          <SectionPanel
             title="Execution runs"
             description="Attempts linked to this task across one or more sessions."
           >
             <RunsTable
-              runs={runs.data}
+              runs={sortedRuns}
               emptyTitle="No runs returned"
               emptyBody="Execution attempts will populate after the worker claims and finalizes the task."
             />
@@ -168,6 +239,13 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
         </div>
 
         <div className="space-y-6">
+          <SectionPanel
+            title="Task memory"
+            description="Curated task summary, important decisions, and bug patterns carried forward into future execution."
+          >
+            <TaskMemoryPanel taskMemory={taskMemory.data} />
+          </SectionPanel>
+
           <SectionPanel
             title="Input payload"
             description="Structured input passed into execution for this task."

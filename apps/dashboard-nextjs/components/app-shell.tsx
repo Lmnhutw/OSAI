@@ -7,9 +7,14 @@ import { cn } from "@/lib/format";
 
 const navItems = [
   {
+    href: "/observability",
+    label: "Observability",
+    description: "Risk, review, QA, retries, and failure filters"
+  },
+  {
     href: "/projects",
     label: "Projects",
-    description: "Requirements, plans, tasks, runs, and logs"
+    description: "Registry, plans, memory, tasks, runs, and logs"
   }
 ];
 
@@ -27,10 +32,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </p>
               <div className="space-y-2">
                 <h1 className="text-2xl font-semibold tracking-[-0.03em] text-[rgb(var(--ink-strong))]">
-                  Control dashboard
+                  Control intelligence
                 </h1>
                 <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                  A restrained admin surface for Phase 1 planning, approval, execution, and log review.
+                  A restrained operator surface for Phase 2 evaluation, memory, execution, and decision support.
                 </p>
               </div>
             </div>
@@ -64,9 +69,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 Scope
               </p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                <li>Project registry and drill-in</li>
-                <li>Plan approvals and grouped tasks</li>
-                <li>Execution runs and session logs</li>
+                <li>Evaluation and QA visibility</li>
+                <li>Memory, decisions, and bug patterns</li>
+                <li>Execution history and retry loops</li>
               </ul>
             </div>
           </div>
@@ -76,14 +81,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <header className="sticky top-0 z-20 border-b border-[rgba(var(--line),0.92)] bg-[rgba(242,244,239,0.86)] backdrop-blur">
             <div className="flex flex-col gap-2 px-5 py-4 md:px-8">
               <p className="text-xs uppercase tracking-[0.28em] text-[rgb(var(--ink-soft))]">
-                Phase 1 visibility
+                Phase 2 intelligence
               </p>
               <div className="flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
                 <p className="text-lg font-semibold tracking-[-0.03em] text-[rgb(var(--ink-strong))]">
-                  Plans, tasks, runs, and logs in one surface
+                  Evaluations, memory, runs, and task flow in one surface
                 </p>
                 <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                  Read data from the control plane, write only approval actions.
+                  Read from the control plane, surface risk, and trigger evaluation actions when operators need them.
                 </p>
               </div>
             </div>

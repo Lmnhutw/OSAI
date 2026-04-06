@@ -118,6 +118,113 @@ export interface EventRecord {
   created_at: string;
 }
 
+export interface DependencyStatus {
+  task_id: string;
+  title: string;
+  status: string;
+  dependency_type: string;
+}
+
+export interface PolicyDecision {
+  allow_auto_execute: boolean;
+  require_review: boolean;
+  require_qa: boolean;
+  require_approval: boolean;
+  block: boolean;
+  escalate: boolean;
+  retry_allowed: boolean;
+  reason_codes: string[];
+  evidence: Record<string, unknown>;
+}
+
+export interface DispatchEvaluation {
+  task_id: string;
+  status: string;
+  ready_for_execution: boolean;
+  risk_level: string;
+  missing_context: string[];
+  risk_flags: string[];
+  acceptance_criteria: string[];
+  constraints: string[];
+  dependencies: DependencyStatus[];
+  execution_payload: Record<string, unknown>;
+  policy_decision: PolicyDecision;
+  evaluated_at: string;
+}
+
+export interface ReviewerDecision {
+  status: string;
+  matched_acceptance_criteria: string[];
+  unmet_acceptance_criteria: string[];
+  scope_deviation: boolean;
+  risky_changes: string[];
+  notes: string[];
+}
+
+export interface ValidationCheck {
+  acceptance_criterion: string;
+  status: string;
+  evidence: string | null;
+}
+
+export interface QADecision {
+  status: string;
+  validation_checks: ValidationCheck[];
+  missing_checks: string[];
+  potential_regressions: string[];
+  notes: string[];
+}
+
+export interface ResultEvaluation {
+  run_id: string;
+  task_id: string;
+  task_session_id: string;
+  status: string;
+  risk_flags: string[];
+  follow_up_actions: string[];
+  reviewer_decision: ReviewerDecision;
+  qa_decision: QADecision;
+  policy_decision: PolicyDecision;
+  evaluated_at: string;
+}
+
+export interface MemoryEvidenceRef {
+  source_type: string;
+  ref_id: string | null;
+  artifact_path: string | null;
+  note: string | null;
+}
+
+export interface MemoryEntry {
+  scope: string;
+  source_type: string;
+  subject: string;
+  summary: string;
+  evidence_refs: MemoryEvidenceRef[];
+  constraints: string[];
+  decision_impact: string;
+  confidence: number;
+  dedupe_key: string;
+  updated_at: string | null;
+}
+
+export interface TaskMemory {
+  task_id: string;
+  project_id: string;
+  summary: string | null;
+  entries: MemoryEntry[];
+  generated_at: string | null;
+  source_event_id: string | null;
+}
+
+export interface ProjectMemory {
+  project_id: string;
+  summary: string | null;
+  entries: MemoryEntry[];
+  generated_at: string | null;
+  source_event_id: string | null;
+}
+
 export interface ApprovalInput {
   requested_by: string;
   decision_note?: string;

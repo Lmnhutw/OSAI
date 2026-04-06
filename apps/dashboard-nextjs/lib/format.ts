@@ -28,7 +28,7 @@ export function truncateId(value?: string | null, size = 8) {
     return value;
   }
 
-  return `${value.slice(0, size)}…`;
+  return `${value.slice(0, size)}...`;
 }
 
 export function formatDateTime(value?: string | null) {
@@ -80,7 +80,31 @@ export function formatJson(value: unknown) {
   return JSON.stringify(value ?? {}, null, 2);
 }
 
-const statusOrder = ["pending", "approved", "in_progress", "running", "completed", "failed"];
+export function formatConfidence(value?: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return "Unknown";
+  }
+
+  return `${Math.round(value * 100)}%`;
+}
+
+const statusOrder = [
+  "pending",
+  "needs_context",
+  "dispatch_blocked",
+  "awaiting_approval",
+  "ready_for_dispatch",
+  "approved",
+  "awaiting_review",
+  "in_progress",
+  "running",
+  "qa_pending",
+  "completed",
+  "pass",
+  "failed",
+  "needs_rework",
+  "blocked"
+];
 
 export function groupTasksByStatus(tasks: Task[]) {
   const groups = new Map<string, Task[]>();

@@ -23,13 +23,14 @@ import { formatDateTime, sentenceCase, truncateId } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 interface PlanDetailPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
-  const plan = await getPlan(params.id);
+  const { id } = await params;
+  const plan = await getPlan(id);
 
   if (plan.state === "not_found") {
     notFound();
@@ -43,10 +44,10 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
         listPlanRuns(plan.data.id)
       ])
     : [
-        emptyResource(null, `/projects/${params.id}`),
-        emptyResource([], `/plans/${params.id}/approvals`),
-        emptyResource([], `/plans/${params.id}/tasks`),
-        emptyResource([], `/plans/${params.id}/runs`)
+        emptyResource(null, `/projects/${id}`),
+        emptyResource([], `/plans/${id}/approvals`),
+        emptyResource([], `/plans/${id}/tasks`),
+        emptyResource([], `/plans/${id}/runs`)
       ];
 
   const sortedApprovals = [...approvals.data].sort((left, right) =>
@@ -57,7 +58,7 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
     <div className="space-y-6">
       <PageHeader
         eyebrow="Plan detail"
-        title={plan.data?.title || `Plan ${truncateId(params.id, 10)}`}
+        title={plan.data?.title || `Plan ${truncateId(id, 10)}`}
         description={
           plan.data?.summary ||
           "Review approval status, grouped tasks, and execution activity for this plan version."
@@ -90,7 +91,7 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
                   label: "Plan ID",
                   value: (
                     <span className="font-mono text-sm text-[rgb(var(--ink-strong))]">
-                      {plan.data?.id || params.id}
+                      {plan.data?.id || id}
                     </span>
                   )
                 },

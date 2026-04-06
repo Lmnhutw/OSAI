@@ -5,8 +5,8 @@ import { AppShell } from "@/components/app-shell";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OSAI Dashboard",
-  description: "Phase 1 visibility dashboard for plans, tasks, execution runs, and logs."
+  title: "OSAI Control Intelligence",
+  description: "Phase 2 dashboard for evaluations, memory, task flow, execution insights, and operator decision support."
 };
 
 export default function RootLayout({

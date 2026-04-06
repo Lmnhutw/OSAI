@@ -5,13 +5,17 @@ import type {
   Approval,
   ApprovalInput,
   BatchTaskApproveInput,
+  DispatchEvaluation,
   EventRecord,
   ExecutionRun,
   HealthStatus,
   Plan,
+  ProjectMemory,
   Project,
   ProjectRequirement,
+  ResultEvaluation,
   Task,
+  TaskMemory,
   TaskDependency,
   TaskSession
 } from "@/lib/api/types";
@@ -171,11 +175,15 @@ export const controlPlanePaths = {
   taskDependencies: (taskId: string) => `/tasks/${taskId}/dependencies`,
   taskSessions: (taskId: string) => `/tasks/${taskId}/sessions`,
   taskRuns: (taskId: string) => `/tasks/${taskId}/runs`,
+  taskEvaluateDispatch: (taskId: string) => `/tasks/${taskId}/evaluate-dispatch`,
   tasksApproveBatch: () => "/tasks/batch/approve",
   session: (sessionId: string) => `/sessions/${sessionId}`,
   sessionEvents: (sessionId: string) => `/sessions/${sessionId}/events`,
   run: (runId: string) => `/runs/${runId}`,
-  runEvents: (runId: string) => `/runs/${runId}/events`
+  runEvents: (runId: string) => `/runs/${runId}/events`,
+  runEvaluateResult: (runId: string) => `/runs/${runId}/evaluate-result`,
+  projectMemory: (projectId: string) => `/memory/project/${projectId}`,
+  taskMemory: (taskId: string) => `/memory/task/${taskId}`
 };
 
 export function emptyResource<T>(data: T, path: string) {
@@ -263,6 +271,22 @@ export function listTaskRuns(taskId: string) {
   });
 }
 
+export function getTaskMemory(taskId: string) {
+  return readResource<TaskMemory>(
+    controlPlanePaths.taskMemory(taskId),
+    {
+      fallback: {
+        task_id: taskId,
+        project_id: "",
+        summary: "No curated task memory exists yet.",
+        entries: [],
+        generated_at: null,
+        source_event_id: null
+      }
+    }
+  );
+}
+
 export function getTaskSession(sessionId: string) {
   return readResource<TaskSession | null>(controlPlanePaths.session(sessionId), {
     fallback: null,
@@ -289,10 +313,33 @@ export function listRunEvents(runId: string) {
   });
 }
 
+export function getProjectMemory(projectId: string) {
+  return readResource<ProjectMemory>(
+    controlPlanePaths.projectMemory(projectId),
+    {
+      fallback: {
+        project_id: projectId,
+        summary: "No curated project memory exists yet.",
+        entries: [],
+        generated_at: null,
+        source_event_id: null
+      }
+    }
+  );
+}
+
 export function approvePlan(planId: string, input: ApprovalInput) {
   return writeResource<Approval>(controlPlanePaths.planApprove(planId), input);
 }
 
 export function approveTasks(input: BatchTaskApproveInput) {
   return writeResource<Task[]>(controlPlanePaths.tasksApproveBatch(), input);
+}
+
+export function evaluateTaskDispatch(taskId: string) {
+  return writeResource<DispatchEvaluation>(controlPlanePaths.taskEvaluateDispatch(taskId), {});
+}
+
+export function evaluateRunResult(runId: string) {
+  return writeResource<ResultEvaluation>(controlPlanePaths.runEvaluateResult(runId), {});
 }

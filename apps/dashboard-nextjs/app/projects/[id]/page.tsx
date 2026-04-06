@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/empty-state";
 import { KeyValueGrid } from "@/components/key-value-grid";
+import { ProjectMemoryPanel } from "@/components/memory-panels";
 import { PageHeader } from "@/components/page-header";
 import { ResourceNotice } from "@/components/resource-notice";
 import { RunsTable } from "@/components/runs-table";
@@ -12,6 +13,8 @@ import { TasksByStatus } from "@/components/tasks-by-status";
 import {
   emptyResource,
   getProject,
+  getProjectMemory,
+  getTaskMemory,
   listPlanRuns,
   listPlanTasks,
   listProjectPlans,
@@ -22,16 +25,18 @@ import { formatDateTime, truncateId } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 interface ProjectDetailPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export default async function ProjectDetailPage({ params }: ProjectDetailPageProps) {
-  const [project, requirements, plans] = await Promise.all([
-    getProject(params.id),
-    listProjectRequirements(params.id),
-    listProjectPlans(params.id)
+  const { id } = await params;
+  const [project, requirements, plans, projectMemory] = await Promise.all([
+    getProject(id),
+    listProjectRequirements(id),
+    listProjectPlans(id),
+    getProjectMemory(id)
   ]);
 
   if (project.state === "not_found") {
@@ -44,15 +49,22 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
   const [tasks, runs] = activePlan
     ? await Promise.all([listPlanTasks(activePlan.id), listPlanRuns(activePlan.id)])
     : [
-        emptyResource([], `/plans/${params.id}/tasks`),
-        emptyResource([], `/plans/${params.id}/runs`)
+        emptyResource([], `/plans/${id}/tasks`),
+        emptyResource([], `/plans/${id}/runs`)
       ];
+
+  const taskMemories = activePlan
+    ? await Promise.all(tasks.data.map((task) => getTaskMemory(task.id)))
+    : [];
+
+  const curatedTaskMemories = taskMemories.map((resource) => resource.data);
+  const curatedTaskCount = curatedTaskMemories.filter((memory) => memory.entries.length > 0).length;
 
   return (
     <div className="space-y-6">
       <PageHeader
         eyebrow="Project overview"
-        title={project.data?.name || `Project ${truncateId(params.id, 10)}`}
+        title={project.data?.name || `Project ${truncateId(id, 10)}`}
         description={
           project.data?.description ||
           "Track requirements, versioned plans, grouped task status, and recent execution activity."
@@ -60,7 +72,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         actions={project.data ? <StatusBadge status={project.data.status} /> : null}
       />
 
-      <ResourceNotice resources={[project, requirements, plans, tasks, runs]} />
+      <ResourceNotice resources={[project, requirements, plans, projectMemory, tasks, runs, ...taskMemories]} />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
@@ -74,7 +86,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
                   label: "Project ID",
                   value: (
                     <span className="font-mono text-sm text-[rgb(var(--ink-strong))]">
-                      {project.data?.id || params.id}
+                      {project.data?.id || id}
                     </span>
                   )
                 },
@@ -148,7 +160,7 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
                   >
                     <div className="space-y-1">
                       <p className="text-sm font-semibold text-[rgb(var(--ink-strong))]">
-                        v{plan.version} · {plan.title}
+                        v{plan.version} - {plan.title}
                       </p>
                       <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
                         {plan.summary || "No plan summary recorded yet."}
@@ -207,6 +219,14 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
                       {runs.data.length}
                     </p>
                   </div>
+                  <div className="surface-inline rounded-2xl p-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--ink-soft))]">
+                      Memory
+                    </p>
+                    <p className="mt-2 text-2xl font-semibold text-[rgb(var(--ink-strong))]">
+                      {curatedTaskCount}
+                    </p>
+                  </div>
                 </div>
                 <div className="flex items-center gap-3">
                   <StatusBadge status={activePlan.status} />
@@ -255,6 +275,17 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
             body="As soon as a plan exists, the dashboard will group its tasks by current execution status."
           />
         )}
+      </SectionPanel>
+
+      <SectionPanel
+        title="Memory workbench"
+        description="Canonical project memory, curated task summaries, important decisions, and recurring bug patterns."
+      >
+        <ProjectMemoryPanel
+          projectId={id}
+          projectMemory={projectMemory.data}
+          taskMemories={curatedTaskMemories}
+        />
       </SectionPanel>
     </div>
   );

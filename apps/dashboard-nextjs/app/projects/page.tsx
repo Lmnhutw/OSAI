@@ -45,9 +45,9 @@ export default async function ProjectsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Phase 1 dashboard"
+        eyebrow="Phase 2 dashboard"
         title="Projects"
-        description="Monitor requirements, plan progression, task state, execution runs, and session evidence from a single admin surface."
+        description="Monitor project registry, plan progression, memory coverage, task state, execution runs, and drill-in evidence from a single operator surface."
         actions={
           <div className="surface-inline inline-flex items-center gap-3 rounded-full px-4 py-2 text-sm text-[rgb(var(--ink-soft))]">
             <span
@@ -161,12 +161,12 @@ export default async function ProjectsPage() {
 
           <SectionPanel
             title="Coverage"
-            description="This dashboard is designed around the Phase 1 workflow shape already present in PostgreSQL."
+            description="This dashboard now layers evaluation and memory visibility over the existing control-plane workflow shape."
           >
             <ul className="space-y-3 text-sm leading-6 text-[rgb(var(--ink-soft))]">
               <li>Requirements attach directly to a project and stay ordered by position.</li>
               <li>Plans stay versioned per project and can be approved in place.</li>
-              <li>Tasks, sessions, execution runs, and event logs remain linked for full drill-down.</li>
+              <li>Tasks, sessions, execution runs, event logs, and curated memory remain linked for drill-down.</li>
             </ul>
           </SectionPanel>
         </div>

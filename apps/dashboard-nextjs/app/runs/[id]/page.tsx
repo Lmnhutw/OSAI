@@ -2,32 +2,41 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { CollapsibleLog } from "@/components/collapsible-log";
+import { ExecutionInsightsPanel } from "@/components/execution-insights-panel";
 import { EventTimeline } from "@/components/event-timeline";
 import { KeyValueGrid } from "@/components/key-value-grid";
 import { PageHeader } from "@/components/page-header";
 import { ResourceNotice } from "@/components/resource-notice";
+import { RunResultPanel } from "@/components/run-result-panel";
 import { SectionPanel } from "@/components/section-panel";
 import { StatusBadge } from "@/components/status-badge";
 import {
   emptyResource,
+  getPlan,
   getRun,
   getTask,
   getTaskSession,
   listRunEvents,
   listSessionEvents
 } from "@/lib/api/control-plane";
+import {
+  getQADecision,
+  getResultEvaluation,
+  getReviewerDecision
+} from "@/lib/intelligence";
 import { formatDateTime, formatDuration, formatJson } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
 interface RunDetailPageProps {
-  params: {
+  params: Promise<{
     id: string;
-  };
+  }>;
 }
 
 export default async function RunDetailPage({ params }: RunDetailPageProps) {
-  const run = await getRun(params.id);
+  const { id } = await params;
+  const run = await getRun(id);
 
   if (run.state === "not_found") {
     notFound();
@@ -35,23 +44,27 @@ export default async function RunDetailPage({ params }: RunDetailPageProps) {
 
   const [session, runEvents] = run.data
     ? await Promise.all([getTaskSession(run.data.task_session_id), listRunEvents(run.data.id)])
-    : [emptyResource(null, `/sessions/${params.id}`), emptyResource([], `/runs/${params.id}/events`)];
+    : [emptyResource(null, `/sessions/${id}`), emptyResource([], `/runs/${id}/events`)];
 
-  const task = session.data ? await getTask(session.data.task_id) : emptyResource(null, `/tasks/${params.id}`);
+  const task = session.data ? await getTask(session.data.task_id) : emptyResource(null, `/tasks/${id}`);
+  const plan = task.data ? await getPlan(task.data.plan_id) : emptyResource(null, `/plans/${id}`);
   const sessionEvents = session.data
     ? await listSessionEvents(session.data.id)
-    : emptyResource([], `/sessions/${params.id}/events`);
+    : emptyResource([], `/sessions/${id}/events`);
+  const resultEvaluation = getResultEvaluation(runEvents.data);
+  const reviewerDecision = getReviewerDecision(runEvents.data) || resultEvaluation?.reviewer_decision || null;
+  const qaDecision = getQADecision(runEvents.data) || resultEvaluation?.qa_decision || null;
 
   return (
     <div className="space-y-6">
       <PageHeader
         eyebrow="Execution run"
-        title={task.data?.title || `Run ${params.id}`}
+        title={task.data?.title || `Run ${id}`}
         description="Inspect run payloads, error state, and the session evidence captured around this execution attempt."
         actions={run.data ? <StatusBadge status={run.data.status} /> : null}
       />
 
-      <ResourceNotice resources={[run, session, task, runEvents, sessionEvents]} />
+      <ResourceNotice resources={[run, session, task, plan, runEvents, sessionEvents]} />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
@@ -65,7 +78,7 @@ export default async function RunDetailPage({ params }: RunDetailPageProps) {
                   label: "Run ID",
                   value: (
                     <span className="font-mono text-sm text-[rgb(var(--ink-strong))]">
-                      {run.data?.id || params.id}
+                      {run.data?.id || id}
                     </span>
                   )
                 },
@@ -104,6 +117,37 @@ export default async function RunDetailPage({ params }: RunDetailPageProps) {
                 }
               ]}
             />
+          </SectionPanel>
+
+          <SectionPanel
+            title="Execution evaluation"
+            description="Result evaluation, reviewer decisions, and QA status for this run attempt."
+          >
+            {run.data ? (
+              <RunResultPanel
+                runId={run.data.id}
+                taskId={task.data?.id}
+                planId={task.data?.plan_id}
+                projectId={plan.data?.project_id}
+                initialEvaluation={resultEvaluation}
+              />
+            ) : null}
+          </SectionPanel>
+
+          <SectionPanel
+            title="Execution insights"
+            description="Test evidence, files changed, and failure reasons extracted from the run payloads and evaluation."
+          >
+            {run.data ? (
+              <ExecutionInsightsPanel
+                run={run.data}
+                session={session.data}
+                events={[...runEvents.data, ...sessionEvents.data]}
+                resultEvaluation={resultEvaluation}
+                reviewerDecision={reviewerDecision}
+                qaDecision={qaDecision}
+              />
+            ) : null}
           </SectionPanel>
 
           <SectionPanel
