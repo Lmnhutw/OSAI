@@ -12,6 +12,7 @@ from .control_plane_support import (
     extract_constraints,
     extract_memory_entries,
     infer_risk_level,
+    is_dependency_satisfied,
     normalize_whitespace,
     previous_failure_count,
     get_task_context,
@@ -19,7 +20,7 @@ from .control_plane_support import (
 from .policy_engine import evaluate_dispatch_policy
 
 
-def evaluate_task_dispatch(session: Session, task_id) -> DispatchEvaluationRead:
+def evaluate_task_dispatch(session: Session, task_id, *, commit: bool = True) -> DispatchEvaluationRead:
     task_context = get_task_context(session, task_id)
     project_memory_entries = extract_memory_entries(
         task_context.latest_project_memory.payload if task_context.latest_project_memory else None
@@ -45,7 +46,7 @@ def evaluate_task_dispatch(session: Session, task_id) -> DispatchEvaluationRead:
                 dependency_type=dependency.link.dependency_type,
             )
         )
-        if dependency.task.status not in {"completed", "done", "approved"}:
+        if not is_dependency_satisfied(dependency.task.status):
             blocked_dependencies.append(dependency.task.title)
 
     missing_context: List[str] = []
@@ -178,6 +179,7 @@ def evaluate_task_dispatch(session: Session, task_id) -> DispatchEvaluationRead:
             "decision": policy_decision.model_dump(mode="json"),
         },
     )
-    session.commit()
+    if commit:
+        session.commit()
 
     return evaluation

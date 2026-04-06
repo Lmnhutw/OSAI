@@ -91,6 +91,61 @@ class TaskDependencyRead(BaseModel):
     class Config:
         from_attributes = True
 
+class TaskRelationshipRead(BaseModel):
+    id: uuid.UUID
+    parent_task_id: uuid.UUID
+    child_task_id: uuid.UUID
+    relationship_type: str
+    metadata: Dict[str, Any] = Field(validation_alias="relationship_metadata")
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class TaskLoopStateRead(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    status: str
+    current_action: Optional[str] = None
+    retry_count: int
+    consecutive_failures: int
+    chain_depth: int
+    follow_up_count: int
+    last_result_status: Optional[str] = None
+    last_bug_category: Optional[str] = None
+    last_failure_pattern: Optional[str] = None
+    last_task_session_id: Optional[uuid.UUID] = None
+    last_run_id: Optional[uuid.UUID] = None
+    loop_started_at: datetime
+    last_transition_at: datetime
+    timeout_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class TaskLoopHistoryEntryRead(BaseModel):
+    id: uuid.UUID
+    task_loop_id: Optional[uuid.UUID] = None
+    task_id: uuid.UUID
+    task_session_id: Optional[uuid.UUID] = None
+    execution_run_id: Optional[uuid.UUID] = None
+    action: str
+    task_status: Optional[str] = None
+    result_status: Optional[str] = None
+    bug_category: Optional[str] = None
+    failure_pattern_key: Optional[str] = None
+    retry_count: int
+    chain_depth: int
+    summary: Optional[str] = None
+    payload: Dict[str, Any]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class TaskSessionRead(BaseModel):
     id: uuid.UUID
     task_id: uuid.UUID
@@ -159,8 +214,49 @@ class PolicyDecisionRead(BaseModel):
     block: bool
     escalate: bool
     retry_allowed: bool
+    manual_break_required: bool = False
+    max_retry: int = 0
+    max_chain_depth: int = 0
+    loop_timeout_seconds: int = 0
+    risk_threshold: str = "medium"
     reason_codes: List[str] = Field(default_factory=list)
     evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FailurePatternRead(BaseModel):
+    pattern_key: str
+    category: str
+    occurrence_count: int
+    recurring: bool = False
+    evidence: List[str] = Field(default_factory=list)
+    memory_hits: List[str] = Field(default_factory=list)
+
+
+class BugTriageRead(BaseModel):
+    category: str
+    recommended_action: str
+    confidence: float = 0.0
+    summary: str
+    pattern_key: str
+    evidence: List[str] = Field(default_factory=list)
+
+
+class LoopDecisionRead(BaseModel):
+    task_id: uuid.UUID
+    run_id: Optional[uuid.UUID] = None
+    next_action: str
+    status: str
+    reasons: List[str] = Field(default_factory=list)
+    requires_human: bool = False
+    retry_count: int
+    chain_depth: int
+    follow_up_task_id: Optional[uuid.UUID] = None
+    chained_task_ids: List[uuid.UUID] = Field(default_factory=list)
+    bug_triage: Optional[BugTriageRead] = None
+    failure_patterns: List[FailurePatternRead] = Field(default_factory=list)
+    policy_decision: PolicyDecisionRead
+    loop_state: TaskLoopStateRead
+    decided_at: datetime
 
 
 class DispatchEvaluationRead(BaseModel):
@@ -211,6 +307,7 @@ class ResultEvaluationRead(BaseModel):
     reviewer_decision: ReviewerDecisionRead
     qa_decision: QADecisionRead
     policy_decision: PolicyDecisionRead
+    loop_decision: Optional[LoopDecisionRead] = None
     evaluated_at: datetime
 
 
@@ -264,3 +361,60 @@ class MemoryCurateResponse(BaseModel):
     projects_curated: int
     task_memories: List[TaskMemoryRead] = Field(default_factory=list)
     project_memories: List[ProjectMemoryRead] = Field(default_factory=list)
+
+
+class LoopNextRequest(BaseModel):
+    run_id: Optional[uuid.UUID] = None
+
+
+class RetryRequest(BaseModel):
+    reason: Optional[str] = None
+    run_id: Optional[uuid.UUID] = None
+
+
+class RetryResponse(BaseModel):
+    task_id: uuid.UUID
+    status: str
+    retry_count: int
+    next_attempt_no: int
+    reason: Optional[str] = None
+    dispatch_evaluation: Optional[DispatchEvaluationRead] = None
+    scheduled_at: datetime
+
+
+class FollowUpTaskCreateRequest(BaseModel):
+    title: Optional[str] = None
+    instructions: Optional[str] = None
+    task_type: str = "follow_up"
+    reason: Optional[str] = None
+    acceptance_criteria: List[str] = Field(default_factory=list)
+    constraints: List[str] = Field(default_factory=list)
+    relation_type: str = "follow_up"
+    push_to_jira: bool = False
+
+
+class FollowUpTaskRead(BaseModel):
+    task: TaskRead
+    relationship: TaskRelationshipRead
+    dependency: Optional[TaskDependencyRead] = None
+    jira_sync_status: str = "skipped"
+
+
+class TaskHistoryEventRead(BaseModel):
+    timestamp: datetime
+    source: str
+    entry_type: str
+    summary: str
+    task_status: Optional[str] = None
+    task_session_id: Optional[uuid.UUID] = None
+    execution_run_id: Optional[uuid.UUID] = None
+    related_task_id: Optional[uuid.UUID] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskHistoryRead(BaseModel):
+    task_id: uuid.UUID
+    loop_state: Optional[TaskLoopStateRead] = None
+    relationships: List[TaskRelationshipRead] = Field(default_factory=list)
+    loop_history: List[TaskLoopHistoryEntryRead] = Field(default_factory=list)
+    entries: List[TaskHistoryEventRead] = Field(default_factory=list)

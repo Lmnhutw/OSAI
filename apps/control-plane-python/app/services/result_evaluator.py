@@ -11,6 +11,7 @@ from .control_plane_support import (
     is_failure_status,
     previous_failure_count,
 )
+from .loop_controller import advance_execution_loop
 from .policy_engine import evaluate_result_policy
 from .qa_agent import run_lightweight_qa
 from .reviewer_agent import review_execution_output
@@ -35,7 +36,7 @@ def evaluate_run_result(session: Session, run_id) -> ResultEvaluationRead:
     if failures >= 2:
         risk_flags.append("repeated_failure_pattern")
 
-    result_status = "qa_pending"
+    result_status = "passed"
     run_error = run_context.execution_run.error_message
     if run_context.execution_run.status == "blocked" or is_blocked_error(run_error):
         result_status = "blocked"
@@ -149,6 +150,12 @@ def evaluate_run_result(session: Session, run_id) -> ResultEvaluationRead:
             "decision": policy_decision.model_dump(mode="json"),
         },
     )
+    loop_decision = advance_execution_loop(
+        session,
+        run_context.task_context.task.id,
+        result_evaluation=evaluation,
+    )
+    evaluation.loop_decision = loop_decision
     session.commit()
 
     return evaluation

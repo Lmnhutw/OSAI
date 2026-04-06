@@ -1,6 +1,8 @@
 import os
 from functools import lru_cache
-from sqlmodel import create_engine, Session
+from sqlmodel import SQLModel, Session, create_engine
+
+from . import models  # noqa: F401
 
 # Use an environment variable with a fallback for local dev
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/osai")
@@ -18,3 +20,7 @@ def get_engine():
 def get_session():
     with Session(get_engine()) as session:
         yield session
+
+
+def init_db():
+    SQLModel.metadata.create_all(get_engine())

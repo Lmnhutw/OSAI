@@ -61,6 +61,58 @@ class TaskDependency(SQLModel, table=True):
     dependency_type: str = Field(default="blocks", sa_type=Text)
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
+class TaskRelationship(SQLModel, table=True):
+    __tablename__ = "task_relationships"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    parent_task_id: uuid.UUID = Field(foreign_key="tasks.id")
+    child_task_id: uuid.UUID = Field(foreign_key="tasks.id")
+    relationship_type: str = Field(default="follow_up", sa_type=Text)
+    relationship_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+
+class TaskLoop(SQLModel, table=True):
+    __tablename__ = "task_loops"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    task_id: uuid.UUID = Field(foreign_key="tasks.id")
+    status: str = Field(default="idle", sa_type=Text)
+    current_action: Optional[str] = Field(default=None, sa_type=Text)
+    retry_count: int = Field(default=0, sa_type=Integer)
+    consecutive_failures: int = Field(default=0, sa_type=Integer)
+    chain_depth: int = Field(default=0, sa_type=Integer)
+    follow_up_count: int = Field(default=0, sa_type=Integer)
+    last_result_status: Optional[str] = Field(default=None, sa_type=Text)
+    last_bug_category: Optional[str] = Field(default=None, sa_type=Text)
+    last_failure_pattern: Optional[str] = Field(default=None, sa_type=Text)
+    last_task_session_id: Optional[uuid.UUID] = Field(default=None, foreign_key="task_sessions.id")
+    last_run_id: Optional[uuid.UUID] = Field(default=None, foreign_key="execution_runs.id")
+    loop_started_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    last_transition_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    timeout_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+
+class TaskLoopHistory(SQLModel, table=True):
+    __tablename__ = "task_loop_history"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    task_loop_id: Optional[uuid.UUID] = Field(default=None, foreign_key="task_loops.id")
+    task_id: uuid.UUID = Field(foreign_key="tasks.id")
+    task_session_id: Optional[uuid.UUID] = Field(default=None, foreign_key="task_sessions.id")
+    execution_run_id: Optional[uuid.UUID] = Field(default=None, foreign_key="execution_runs.id")
+    action: str = Field(sa_type=Text)
+    task_status: Optional[str] = Field(default=None, sa_type=Text)
+    result_status: Optional[str] = Field(default=None, sa_type=Text)
+    bug_category: Optional[str] = Field(default=None, sa_type=Text)
+    failure_pattern_key: Optional[str] = Field(default=None, sa_type=Text)
+    retry_count: int = Field(default=0, sa_type=Integer)
+    chain_depth: int = Field(default=0, sa_type=Integer)
+    summary: Optional[str] = Field(default=None, sa_type=Text)
+    payload: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+
 class Approval(SQLModel, table=True):
     __tablename__ = "approvals"
 

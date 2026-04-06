@@ -17,6 +17,9 @@ from ..models import (
     ProjectRequirement,
     Task,
     TaskDependency,
+    TaskLoop,
+    TaskLoopHistory,
+    TaskRelationship,
     TaskSession,
 )
 
@@ -331,6 +334,10 @@ def is_success_status(status: Optional[str]) -> bool:
     return (status or "").lower() in SUCCESS_STATUSES
 
 
+def is_dependency_satisfied(status: Optional[str]) -> bool:
+    return (status or "").lower() in {"completed", "done", "approved"}
+
+
 def is_failure_status(status: Optional[str]) -> bool:
     return (status or "").lower() in FAILURE_STATUSES
 
@@ -347,6 +354,58 @@ def latest_memory_event(session: Session, *, project_id=None, task_id=None, even
     if task_id is not None:
         statement = statement.where(Event.task_id == task_id)
     return session.exec(statement.order_by(Event.occurred_at.desc())).first()
+
+
+def latest_result_event(session: Session, *, task_id, run_id=None) -> Optional[Event]:
+    statement = select(Event).where(
+        Event.task_id == task_id,
+        Event.event_type == "result_evaluation.recorded",
+    )
+    if run_id is not None:
+        statement = statement.where(Event.execution_run_id == run_id)
+    return session.exec(statement.order_by(Event.occurred_at.desc())).first()
+
+
+def get_task_loop(session: Session, task_id) -> Optional[TaskLoop]:
+    return session.exec(
+        select(TaskLoop)
+        .where(TaskLoop.task_id == task_id)
+        .order_by(TaskLoop.created_at.desc())
+    ).first()
+
+
+def get_task_loop_history(session: Session, task_id) -> List[TaskLoopHistory]:
+    return session.exec(
+        select(TaskLoopHistory)
+        .where(TaskLoopHistory.task_id == task_id)
+        .order_by(TaskLoopHistory.created_at.desc())
+    ).all()
+
+
+def get_task_relationships(
+    session: Session,
+    *,
+    parent_task_id=None,
+    child_task_id=None,
+    relationship_type: Optional[str] = None,
+) -> List[TaskRelationship]:
+    statement = select(TaskRelationship)
+    if parent_task_id is not None:
+        statement = statement.where(TaskRelationship.parent_task_id == parent_task_id)
+    if child_task_id is not None:
+        statement = statement.where(TaskRelationship.child_task_id == child_task_id)
+    if relationship_type:
+        statement = statement.where(TaskRelationship.relationship_type == relationship_type)
+    return session.exec(statement.order_by(TaskRelationship.created_at.desc())).all()
+
+
+def next_task_position(session: Session, plan_id) -> int:
+    latest_task = session.exec(
+        select(Task)
+        .where(Task.plan_id == plan_id)
+        .order_by(Task.position.desc())
+    ).first()
+    return (latest_task.position if latest_task else 0) + 1
 
 
 def get_task_context(session: Session, task_id) -> TaskContext:
