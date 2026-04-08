@@ -31,9 +31,10 @@ export function ExecutionInsightsPanel({
   const validationChecks = extractValidationChecks(resultEvaluation, run, session, events);
   const changedFiles = extractChangedFiles(run.output_payload);
   const failureReasons = collectFailureReasons(run, resultEvaluation, reviewerDecision, qaDecision);
+  const loopDecision = resultEvaluation?.loop_decision || null;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-3">
+    <div className="grid gap-4 xl:grid-cols-2 2xl:grid-cols-4">
       <div className="surface-inline rounded-[24px] px-4 py-4">
         <p className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--ink-soft))]">
           Test results
@@ -94,6 +95,26 @@ export function ExecutionInsightsPanel({
               <li key={reason}>{reason}</li>
             ))}
           </ul>
+        )}
+      </div>
+
+      <div className="surface-inline rounded-[24px] px-4 py-4">
+        <p className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--ink-soft))]">
+          Loop control
+        </p>
+        {!loopDecision ? (
+          <p className="mt-3 text-sm leading-6 text-[rgb(var(--ink-soft))]">
+            No loop decision was attached to this result evaluation.
+          </p>
+        ) : (
+          <div className="mt-3 space-y-3 text-sm leading-6 text-[rgb(var(--ink-strong))]">
+            <p>Next action: {sentenceCase(loopDecision.next_action)}</p>
+            <p>Retry count: {loopDecision.retry_count}</p>
+            <p>Loop depth: {loopDecision.chain_depth}</p>
+            <p>
+              Escalation: {loopDecision.requires_human ? "Human handoff required" : "Autonomous"}
+            </p>
+          </div>
         )}
       </div>
     </div>

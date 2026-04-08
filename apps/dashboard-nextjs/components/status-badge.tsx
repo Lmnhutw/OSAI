@@ -14,17 +14,29 @@ const toneMap: Record<string, string> = {
   awaiting_approval: "bg-amber-100 text-amber-900 border-amber-200",
   qa_pending: "bg-amber-100 text-amber-900 border-amber-200",
   review_required: "bg-amber-100 text-amber-900 border-amber-200",
+  retry_scheduled: "bg-orange-100 text-orange-800 border-orange-200",
+  needs_follow_up: "bg-orange-100 text-orange-800 border-orange-200",
   draft: "bg-slate-100 text-slate-700 border-slate-200",
   open: "bg-slate-100 text-slate-700 border-slate-200",
   not_evaluated: "bg-slate-100 text-slate-700 border-slate-200",
+  chain_ready: "bg-sky-100 text-sky-800 border-sky-200",
   failed: "bg-rose-100 text-rose-800 border-rose-200",
   rejected: "bg-rose-100 text-rose-800 border-rose-200",
   blocked: "bg-rose-100 text-rose-800 border-rose-200",
   dispatch_blocked: "bg-rose-100 text-rose-800 border-rose-200",
   needs_rework: "bg-rose-100 text-rose-800 border-rose-200",
+  escalated: "bg-rose-100 text-rose-800 border-rose-200",
   needs_context: "bg-orange-100 text-orange-800 border-orange-200",
   awaiting_review: "bg-violet-100 text-violet-800 border-violet-200",
-  retrying: "bg-orange-100 text-orange-800 border-orange-200"
+  retrying: "bg-orange-100 text-orange-800 border-orange-200",
+  follow_up_created: "bg-violet-100 text-violet-800 border-violet-200",
+  passed: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  re_execute: "bg-orange-100 text-orange-800 border-orange-200",
+  create_follow_up_task: "bg-violet-100 text-violet-800 border-violet-200",
+  chain_next_task: "bg-sky-100 text-sky-800 border-sky-200",
+  mark_done: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  escalate_to_human: "bg-rose-100 text-rose-800 border-rose-200",
+  manual_retry: "bg-orange-100 text-orange-800 border-orange-200"
 };
 
 export function StatusBadge({ status }: { status: string }) {

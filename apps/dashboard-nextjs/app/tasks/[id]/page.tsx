@@ -3,7 +3,6 @@ import { notFound } from "next/navigation";
 
 import { TaskApprovalForm } from "@/components/approval-forms";
 import { CollapsibleLog } from "@/components/collapsible-log";
-import { ExecutionFlowTimeline } from "@/components/execution-flow-timeline";
 import { EventTimeline } from "@/components/event-timeline";
 import { KeyValueGrid } from "@/components/key-value-grid";
 import { TaskMemoryPanel } from "@/components/memory-panels";
@@ -12,24 +11,20 @@ import { ResourceNotice } from "@/components/resource-notice";
 import { RunsTable } from "@/components/runs-table";
 import { SectionPanel } from "@/components/section-panel";
 import { StatusBadge } from "@/components/status-badge";
+import { TaskAutonomyPanel } from "@/components/task-autonomy-panel";
 import { TaskDispatchPanel } from "@/components/task-dispatch-panel";
 import {
   emptyResource,
   getPlan,
   getTask,
+  getTaskHistory,
   getTaskMemory,
-  listRunEvents,
+  listPlanTasks,
   listSessionEvents,
   listTaskDependencies,
   listTaskRuns,
   listTaskSessions
 } from "@/lib/api/control-plane";
-import {
-  buildExecutionFlow,
-  getQADecision,
-  getResultEvaluation,
-  getReviewerDecision
-} from "@/lib/intelligence";
 import { formatDateTime, formatJson } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -48,18 +43,31 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
     notFound();
   }
 
-  const [plan, dependencies, sessions, runs] = task.data
+  const [plan, planTasks, dependencies, sessions, runs, taskHistory] = task.data
     ? await Promise.all([
         getPlan(task.data.plan_id),
+        listPlanTasks(task.data.plan_id),
         listTaskDependencies(task.data.id),
         listTaskSessions(task.data.id),
-        listTaskRuns(task.data.id)
+        listTaskRuns(task.data.id),
+        getTaskHistory(task.data.id)
       ])
     : [
         emptyResource(null, `/plans/${id}`),
+        emptyResource([], `/plans/${id}/tasks`),
         emptyResource([], `/tasks/${id}/dependencies`),
         emptyResource([], `/tasks/${id}/sessions`),
-        emptyResource([], `/tasks/${id}/runs`)
+        emptyResource([], `/tasks/${id}/runs`),
+        emptyResource(
+          {
+            task_id: id,
+            loop_state: null,
+            relationships: [],
+            loop_history: [],
+            entries: []
+          },
+          `/tasks/${id}/history`
+        )
       ];
 
   const sortedSessions = [...sessions.data].sort((left, right) =>
@@ -69,13 +77,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
   const sortedRuns = [...runs.data].sort((left, right) =>
     (right.started_at || right.created_at).localeCompare(left.started_at || left.created_at)
   );
-  const latestRun = sortedRuns[0] ?? null;
   const sessionEvents = latestSession
     ? await listSessionEvents(latestSession.id)
     : emptyResource([], `/sessions/${id}/events`);
-  const latestRunEvents = latestRun
-    ? await listRunEvents(latestRun.id)
-    : emptyResource([], `/runs/${id}/events`);
   const taskMemory = task.data
     ? await getTaskMemory(task.data.id)
     : emptyResource(
@@ -90,21 +94,46 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
         `/memory/task/${id}`
       );
 
-  const latestResultEvaluation = getResultEvaluation(latestRunEvents.data);
-  const latestReviewerDecision =
-    getReviewerDecision(latestRunEvents.data) || latestResultEvaluation?.reviewer_decision || null;
-  const latestQADecision =
-    getQADecision(latestRunEvents.data) || latestResultEvaluation?.qa_decision || null;
-  const flowItems = task.data
-    ? buildExecutionFlow(
-        task.data,
-        sessions.data,
-        runs.data,
-        null,
-        latestResultEvaluation,
-        latestReviewerDecision,
-        latestQADecision
-      )
+  const taskLookup = new Map(planTasks.data.map((planTask) => [planTask.id, planTask]));
+  if (task.data) {
+    taskLookup.set(task.data.id, task.data);
+  }
+
+  const relationshipItems = task.data
+    ? [
+        ...dependencies.data.map((dependency) => ({
+          key: `dependency-${dependency.id}`,
+          taskId: dependency.depends_on_task_id,
+          label: "Dependency",
+          detail: `Blocks this task via ${dependency.dependency_type}.`,
+          status: taskLookup.get(dependency.depends_on_task_id)?.status || "open"
+        })),
+        ...taskHistory.data.relationships
+          .filter((relationship) => relationship.child_task_id === task.data?.id)
+          .map((relationship) => ({
+            key: `incoming-${relationship.id}`,
+            taskId: relationship.parent_task_id,
+            label: "Parent task",
+            detail:
+              relationship.relationship_type === "chain"
+                ? "Feeds this task through an autonomous chain."
+                : `Linked as ${relationship.relationship_type}.`,
+            status: taskLookup.get(relationship.parent_task_id)?.status || "open"
+          })),
+        ...taskHistory.data.relationships
+          .filter((relationship) => relationship.parent_task_id === task.data?.id)
+          .map((relationship) => ({
+            key: `outgoing-${relationship.id}`,
+            taskId: relationship.child_task_id,
+            label:
+              relationship.relationship_type === "chain" ? "Chain task" : "Follow-up task",
+            detail:
+              relationship.relationship_type === "chain"
+                ? "Spawned or activated as the next step in the loop."
+                : `Created as a ${relationship.relationship_type} task.`,
+            status: taskLookup.get(relationship.child_task_id)?.status || "open"
+          }))
+      ]
     : [];
 
   return (
@@ -132,7 +161,7 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
       />
 
       <ResourceNotice
-        resources={[task, plan, dependencies, sessions, runs, sessionEvents, latestRunEvents, taskMemory]}
+        resources={[task, plan, planTasks, dependencies, sessions, runs, taskHistory, sessionEvents, taskMemory]}
       />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -209,10 +238,19 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
           </SectionPanel>
 
           <SectionPanel
-            title="Task flow"
-            description="State transitions, execution history, and retry loops across sessions and runs."
+            title="Autonomous execution"
+            description="Timeline and graph views for retries, task chains, follow-up creation, and escalation points."
           >
-            <ExecutionFlowTimeline items={flowItems} />
+            {task.data ? (
+              <TaskAutonomyPanel
+                task={task.data}
+                planTasks={planTasks.data}
+                dependencies={dependencies.data}
+                sessions={sessions.data}
+                runs={runs.data}
+                history={taskHistory.data}
+              />
+            ) : null}
           </SectionPanel>
 
           <SectionPanel
@@ -258,23 +296,34 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
           </SectionPanel>
 
           <SectionPanel
-            title="Dependencies"
-            description="Tasks that must complete before this task can move forward."
+            title="Task relationships"
+            description="Dependencies, parent links, follow-ups, and chained tasks connected to this task."
           >
-            {dependencies.data.length === 0 ? (
+            {relationshipItems.length === 0 ? (
               <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                No task dependencies were returned for this task.
+                No relationships were returned for this task.
               </p>
             ) : (
               <ul className="space-y-3">
-                {dependencies.data.map((dependency) => (
-                  <li key={dependency.id} className="surface-inline rounded-2xl px-4 py-4">
-                    <p className="text-sm font-semibold text-[rgb(var(--ink-strong))]">
-                      Blocks on task {dependency.depends_on_task_id}
-                    </p>
-                    <p className="mt-1 text-sm text-[rgb(var(--ink-soft))]">
-                      Dependency type: {dependency.dependency_type}
-                    </p>
+                {relationshipItems.map((relationship) => (
+                  <li key={relationship.key} className="surface-inline rounded-2xl px-4 py-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <p className="text-xs uppercase tracking-[0.18em] text-[rgb(var(--ink-soft))]">
+                          {relationship.label}
+                        </p>
+                        <Link
+                          href={`/tasks/${relationship.taskId}`}
+                          className="text-sm font-semibold text-[rgb(var(--ink-strong))] transition hover:text-[rgb(var(--accent))]"
+                        >
+                          {taskLookup.get(relationship.taskId)?.title || relationship.taskId}
+                        </Link>
+                        <p className="text-sm text-[rgb(var(--ink-soft))]">
+                          {relationship.detail}
+                        </p>
+                      </div>
+                      <StatusBadge status={relationship.status} />
+                    </div>
                   </li>
                 ))}
               </ul>

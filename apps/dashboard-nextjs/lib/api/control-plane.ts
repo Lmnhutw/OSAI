@@ -17,6 +17,7 @@ import type {
   Task,
   TaskMemory,
   TaskDependency,
+  TaskHistory,
   TaskSession
 } from "@/lib/api/types";
 
@@ -173,6 +174,7 @@ export const controlPlanePaths = {
   planApprove: (planId: string) => `/plans/${planId}/approve`,
   task: (taskId: string) => `/tasks/${taskId}`,
   taskDependencies: (taskId: string) => `/tasks/${taskId}/dependencies`,
+  taskHistory: (taskId: string) => `/tasks/${taskId}/history`,
   taskSessions: (taskId: string) => `/tasks/${taskId}/sessions`,
   taskRuns: (taskId: string) => `/tasks/${taskId}/runs`,
   taskEvaluateDispatch: (taskId: string) => `/tasks/${taskId}/evaluate-dispatch`,
@@ -257,6 +259,22 @@ export function listTaskDependencies(taskId: string) {
   return readResource<TaskDependency[]>(controlPlanePaths.taskDependencies(taskId), {
     fallback: []
   });
+}
+
+export function getTaskHistory(taskId: string) {
+  return readResource<TaskHistory>(
+    controlPlanePaths.taskHistory(taskId),
+    {
+      fallback: {
+        task_id: taskId,
+        loop_state: null,
+        relationships: [],
+        loop_history: [],
+        entries: []
+      },
+      notFoundDetails: ["Task not found"]
+    }
+  );
 }
 
 export function listTaskSessions(taskId: string) {

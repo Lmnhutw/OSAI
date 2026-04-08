@@ -62,6 +62,55 @@ export interface TaskDependency {
   created_at: string;
 }
 
+export interface TaskRelationship {
+  id: string;
+  parent_task_id: string;
+  child_task_id: string;
+  relationship_type: string;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskLoopState {
+  id: string;
+  task_id: string;
+  status: string;
+  current_action: string | null;
+  retry_count: number;
+  consecutive_failures: number;
+  chain_depth: number;
+  follow_up_count: number;
+  last_result_status: string | null;
+  last_bug_category: string | null;
+  last_failure_pattern: string | null;
+  last_task_session_id: string | null;
+  last_run_id: string | null;
+  loop_started_at: string;
+  last_transition_at: string;
+  timeout_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskLoopHistoryEntry {
+  id: string;
+  task_loop_id: string | null;
+  task_id: string;
+  task_session_id: string | null;
+  execution_run_id: string | null;
+  action: string;
+  task_status: string | null;
+  result_status: string | null;
+  bug_category: string | null;
+  failure_pattern_key: string | null;
+  retry_count: number;
+  chain_depth: number;
+  summary: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
 export interface Approval {
   id: string;
   plan_id: string;
@@ -133,6 +182,11 @@ export interface PolicyDecision {
   block: boolean;
   escalate: boolean;
   retry_allowed: boolean;
+  manual_break_required: boolean;
+  max_retry: number;
+  max_chain_depth: number;
+  loop_timeout_seconds: number;
+  risk_threshold: string;
   reason_codes: string[];
   evidence: Record<string, unknown>;
 }
@@ -175,6 +229,42 @@ export interface QADecision {
   notes: string[];
 }
 
+export interface FailurePattern {
+  pattern_key: string;
+  category: string;
+  occurrence_count: number;
+  recurring: boolean;
+  evidence: string[];
+  memory_hits: string[];
+}
+
+export interface BugTriage {
+  category: string;
+  pattern_key: string | null;
+  summary: string;
+  recommended_action: string;
+  severity: string;
+  evidence: string[];
+}
+
+export interface LoopDecision {
+  task_id: string;
+  run_id: string | null;
+  next_action: string;
+  status: string;
+  reasons: string[];
+  requires_human: boolean;
+  retry_count: number;
+  chain_depth: number;
+  follow_up_task_id: string | null;
+  chained_task_ids: string[];
+  bug_triage: BugTriage | null;
+  failure_patterns: FailurePattern[];
+  policy_decision: PolicyDecision;
+  loop_state: TaskLoopState;
+  decided_at: string;
+}
+
 export interface ResultEvaluation {
   run_id: string;
   task_id: string;
@@ -185,6 +275,7 @@ export interface ResultEvaluation {
   reviewer_decision: ReviewerDecision;
   qa_decision: QADecision;
   policy_decision: PolicyDecision;
+  loop_decision: LoopDecision | null;
   evaluated_at: string;
 }
 
@@ -223,6 +314,26 @@ export interface ProjectMemory {
   entries: MemoryEntry[];
   generated_at: string | null;
   source_event_id: string | null;
+}
+
+export interface TaskHistoryEvent {
+  timestamp: string;
+  source: string;
+  entry_type: string;
+  summary: string;
+  task_status: string | null;
+  task_session_id: string | null;
+  execution_run_id: string | null;
+  related_task_id: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface TaskHistory {
+  task_id: string;
+  loop_state: TaskLoopState | null;
+  relationships: TaskRelationship[];
+  loop_history: TaskLoopHistoryEntry[];
+  entries: TaskHistoryEvent[];
 }
 
 export interface ApprovalInput {

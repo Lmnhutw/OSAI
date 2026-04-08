@@ -102,6 +102,27 @@ export function RunResultPanel({
             />
           </div>
 
+          {evaluation.loop_decision ? (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <PolicyCell
+                label="Next action"
+                value={evaluation.loop_decision.next_action.replace(/_/g, " ")}
+              />
+              <PolicyCell
+                label="Retry count"
+                value={String(evaluation.loop_decision.retry_count)}
+              />
+              <PolicyCell
+                label="Chain depth"
+                value={String(evaluation.loop_decision.chain_depth)}
+              />
+              <PolicyCell
+                label="Human handoff"
+                value={evaluation.loop_decision.requires_human ? "Required" : "Autonomous"}
+              />
+            </div>
+          ) : null}
+
           <div className="grid gap-5 xl:grid-cols-2">
             <div className="space-y-3">
               <div className="surface-inline rounded-[24px] px-4 py-4">
