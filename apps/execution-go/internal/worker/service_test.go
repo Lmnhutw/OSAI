@@ -30,11 +30,17 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 	}
 
 	fakeStore := &stubStore{
-		retryRun: &store.RunAttempt{RunID: "run-2", AttemptNo: 2},
+		retryRun: &store.RunAttempt{RunID: "run-2", AttemptNo: 2, RetryCount: 1},
 	}
 	fakeJira := &stubJira{}
 	fakeWorkspace := &stubWorkspace{
-		ws: workspace.Workspace{Path: "C:/tmp/ws", BranchName: "codex/ops-1"},
+		ws: workspace.Workspace{
+			RootPath:       "C:/tmp/ws-run",
+			Path:           "C:/tmp/ws",
+			MetadataPath:   "C:/tmp/ws-run/.execution",
+			BranchName:     "codex/ops-1",
+			BranchStrategy: "created_from_base",
+		},
 	}
 	fakeCodex := &stubCodex{
 		results: []cli.Result{
@@ -78,11 +84,13 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 				"acceptanceCriteria": []any{"All tests pass"},
 			},
 		},
-		SessionID:    "session-1",
-		RunID:        "run-1",
-		AttemptNo:    1,
-		JiraIssueKey: "OPS-1",
-		WorkerName:   "worker-1",
+		SessionID:      "session-1",
+		RunID:          "run-1",
+		AttemptNo:      1,
+		RetryCount:     0,
+		ExecutionIndex: 1,
+		JiraIssueKey:   "OPS-1",
+		WorkerName:     "worker-1",
 	}
 
 	err := service.executeClaimedTask(context.Background(), jira.Issue{Key: "OPS-1", Summary: "Build worker"}, claimed)
@@ -95,6 +103,9 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 	}
 	if fakeStore.finalizeCalls[0].RunStatus != "retryable_failure" {
 		t.Fatalf("expected first finalize to mark retryable failure, got %+v", fakeStore.finalizeCalls[0])
+	}
+	if fakeStore.finalizeCalls[0].RetryCount != 0 {
+		t.Fatalf("expected first finalize retry count to stay at 0, got %+v", fakeStore.finalizeCalls[0])
 	}
 	if fakeStore.finalizeCalls[1].TaskStatus != evaluationReadyState {
 		t.Fatalf("expected final finalize to mark task evaluation ready, got %+v", fakeStore.finalizeCalls[1])
@@ -131,6 +142,15 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 	if executionResult.Evaluation.State != evaluationReadyState {
 		t.Fatalf("expected execution result to be evaluation ready, got %+v", executionResult)
 	}
+	if executionResult.Metadata.ExecutionIndex != 1 || executionResult.Metadata.RetryCount != 1 {
+		t.Fatalf("expected execution metadata to persist loop counters, got %+v", executionResult.Metadata)
+	}
+	if !executionResult.Metadata.WorkspaceCleaned {
+		t.Fatalf("expected workspace cleanup to be recorded, got %+v", executionResult.Metadata)
+	}
+	if len(executionResult.History) != 2 {
+		t.Fatalf("expected execution history to contain both attempts, got %+v", executionResult.History)
+	}
 }
 
 func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
@@ -143,14 +163,20 @@ func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
 	}
 
 	fakeStore := &stubStore{
-		retryRun: &store.RunAttempt{RunID: "run-2", AttemptNo: 2},
+		retryRun: &store.RunAttempt{RunID: "run-2", AttemptNo: 2, RetryCount: 1},
 	}
 	service := NewService(
 		cfg,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		&stubJira{},
 		fakeStore,
-		&stubWorkspace{ws: workspace.Workspace{Path: "C:/tmp/ws", BranchName: "codex/ops-1"}},
+		&stubWorkspace{ws: workspace.Workspace{
+			RootPath:       "C:/tmp/ws-run",
+			Path:           "C:/tmp/ws",
+			MetadataPath:   "C:/tmp/ws-run/.execution",
+			BranchName:     "codex/ops-1",
+			BranchStrategy: "created_from_base",
+		}},
 		&stubCodex{results: []cli.Result{
 			{Label: "codex", CommandLine: "codex exec", ExitCode: 0},
 			{Label: "codex", CommandLine: "codex exec", ExitCode: 0},
@@ -173,11 +199,13 @@ func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
 				"test_commands": []any{"go test ./..."},
 			},
 		},
-		SessionID:    "session-1",
-		RunID:        "run-1",
-		AttemptNo:    1,
-		JiraIssueKey: "OPS-1",
-		WorkerName:   "worker-1",
+		SessionID:      "session-1",
+		RunID:          "run-1",
+		AttemptNo:      1,
+		RetryCount:     0,
+		ExecutionIndex: 1,
+		JiraIssueKey:   "OPS-1",
+		WorkerName:     "worker-1",
 	}
 
 	if err := service.executeClaimedTask(context.Background(), jira.Issue{Key: "OPS-1", Summary: "Build worker"}, claimed); err != nil {
@@ -229,7 +257,7 @@ func (s *stubStore) ClaimReadyTask(ctx context.Context, jiraIssueKey, workerName
 	return nil, nil
 }
 
-func (s *stubStore) StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, inputPayload map[string]any) (*store.RunAttempt, error) {
+func (s *stubStore) StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, retryCount int, inputPayload map[string]any) (*store.RunAttempt, error) {
 	s.retryCount++
 	return s.retryRun, nil
 }
@@ -240,7 +268,8 @@ func (s *stubStore) FinalizeRun(ctx context.Context, input store.FinalizeRunInpu
 }
 
 type stubWorkspace struct {
-	ws workspace.Workspace
+	ws          workspace.Workspace
+	cleanupRuns int
 }
 
 func (s *stubWorkspace) Prepare(ctx context.Context, req workspace.PrepareRequest) (workspace.Workspace, []cli.Result, error) {
@@ -249,6 +278,11 @@ func (s *stubWorkspace) Prepare(ctx context.Context, req workspace.PrepareReques
 
 func (s *stubWorkspace) ChangedFiles(ctx context.Context, workspacePath string) ([]string, cli.Result) {
 	return []string{"internal/worker/service.go"}, cli.Result{Label: "git status", CommandLine: "git status --short", ExitCode: 0}
+}
+
+func (s *stubWorkspace) Cleanup(ctx context.Context, ws workspace.Workspace) (cli.Result, error) {
+	s.cleanupRuns++
+	return cli.Result{Label: "workspace cleanup", CommandLine: "cleanup workspace", ExitCode: 0}, nil
 }
 
 type stubCodex struct {

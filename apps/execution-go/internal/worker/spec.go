@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"execution-go/internal/config"
@@ -12,6 +13,7 @@ import (
 type ExecutionSpec struct {
 	TaskID                 string
 	JiraIssueKey           string
+	RunID                  string
 	Title                  string
 	Goal                   string
 	Instructions           string
@@ -24,9 +26,13 @@ type ExecutionSpec struct {
 	WorkingDirectory       string
 	LintCommands           []string
 	TestCommands           []string
+	RetryCount             int
+	ExecutionIndex         int
+	FailurePatternHint     string
 }
 
-func BuildExecutionSpec(cfg config.Config, issue jira.Issue, task store.Task) ExecutionSpec {
+func BuildExecutionSpec(cfg config.Config, issue jira.Issue, claimed *store.ClaimedTask) ExecutionSpec {
+	task := claimed.Task
 	payload := task.InputPayload
 
 	goal := firstString(
@@ -56,9 +62,18 @@ func BuildExecutionSpec(cfg config.Config, issue jira.Issue, task store.Task) Ex
 		suggestBranch(issue.Key, goal),
 	)
 
+	retryCount := maxInt(
+		claimed.RetryCount,
+		lookupInt(payload, "retry_count"),
+		lookupInt(payload, "retryCount"),
+		lookupInt(payload, "loop.retry_count"),
+		lookupInt(payload, "loop.retryCount"),
+	)
+
 	return ExecutionSpec{
 		TaskID:                 task.ID,
-		JiraIssueKey:           firstString(issue.Key, lookupString(payload, "jira_issue_key"), lookupString(payload, "jira.issue_key"), lookupString(payload, "jira.issueKey")),
+		JiraIssueKey:           firstString(issue.Key, lookupString(payload, "jira_issue_key"), lookupString(payload, "jira.issue_key"), lookupString(payload, "jira.issueKey"), lookupString(payload, "jira.key")),
+		RunID:                  claimed.RunID,
 		Title:                  task.Title,
 		Goal:                   goal,
 		Instructions:           instructions,
@@ -71,6 +86,15 @@ func BuildExecutionSpec(cfg config.Config, issue jira.Issue, task store.Task) Ex
 		WorkingDirectory:       firstString(lookupString(payload, "working_dir"), lookupString(payload, "workingDirectory"), cfg.DefaultWorkingDir),
 		LintCommands:           firstSlice(lookupStrings(payload, "lint_commands"), lookupStrings(payload, "lintCommands"), cfg.DefaultLintCommands),
 		TestCommands:           firstSlice(lookupStrings(payload, "test_commands"), lookupStrings(payload, "testCommands"), cfg.DefaultTestCommands),
+		RetryCount:             retryCount,
+		ExecutionIndex:         maxInt(1, claimed.ExecutionIndex),
+		FailurePatternHint: firstString(
+			claimed.FailurePatternHint,
+			lookupString(payload, "failure_pattern_hint"),
+			lookupString(payload, "failurePatternHint"),
+			lookupString(payload, "loop.failure_pattern_hint"),
+			lookupString(payload, "loop.failurePatternHint"),
+		),
 	}
 }
 
@@ -111,6 +135,36 @@ func lookupStrings(payload map[string]any, path string) []string {
 		return cleanStrings(parts)
 	default:
 		return nil
+	}
+}
+
+func lookupInt(payload map[string]any, path string) int {
+	value, ok := lookupValue(payload, path)
+	if !ok {
+		return 0
+	}
+
+	switch typed := value.(type) {
+	case int:
+		return maxInt(0, typed)
+	case int32:
+		return maxInt(0, int(typed))
+	case int64:
+		return maxInt(0, int(typed))
+	case float64:
+		return maxInt(0, int(typed))
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(typed))
+		if err != nil {
+			return 0
+		}
+		return maxInt(0, parsed)
+	default:
+		parsed, err := strconv.Atoi(strings.TrimSpace(fmt.Sprintf("%v", typed)))
+		if err != nil {
+			return 0
+		}
+		return maxInt(0, parsed)
 	}
 }
 
@@ -197,4 +251,14 @@ func slugify(value string) string {
 		slug = slug[:40]
 	}
 	return strings.Trim(slug, "-")
+}
+
+func maxInt(values ...int) int {
+	best := 0
+	for _, value := range values {
+		if value > best {
+			best = value
+		}
+	}
+	return best
 }

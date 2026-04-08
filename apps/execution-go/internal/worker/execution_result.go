@@ -17,6 +17,7 @@ const (
 
 type attemptOutcome struct {
 	AttemptNo              int
+	RetryCount             int
 	Status                 execresult.Status
 	Summary                string
 	FailureReason          string
@@ -25,6 +26,7 @@ type attemptOutcome struct {
 	Confidence             execresult.Confidence
 	Anomalies              []string
 	RetrySuggestions       []string
+	RootCauseHints         []string
 	RetryEligible          bool
 	FailureFingerprint     string
 	RepeatedFailurePattern bool
@@ -33,6 +35,7 @@ type attemptOutcome struct {
 
 func summarizeAttemptOutcome(
 	attemptNo int,
+	retryCount int,
 	maxAttempts int,
 	codexResult cli.Result,
 	runErr error,
@@ -58,6 +61,7 @@ func summarizeAttemptOutcome(
 
 	outcome := attemptOutcome{
 		AttemptNo:      attemptNo,
+		RetryCount:     max(retryCount, 0),
 		Status:         execresult.StatusSucceeded,
 		Validation:     validation,
 		CodexSucceeded: codexSucceeded,
@@ -73,10 +77,12 @@ func summarizeAttemptOutcome(
 	outcome.FailureClassification = classifyFailure(runErr, codexResult, validation)
 	outcome.FailureFingerprint = buildFailureFingerprint(outcome.FailureClassification, codexResult, runErr, validation)
 	outcome.RetrySuggestions = retrySuggestionsFor(outcome.FailureClassification)
+	outcome.RootCauseHints = detectRootCauseHints(outcome.FailureClassification, codexResult, runErr, validation)
 
 	if outcome.FailureFingerprint != "" && seenFingerprints[outcome.FailureFingerprint] > 0 {
 		outcome.RepeatedFailurePattern = true
 		outcome.Anomalies = append(outcome.Anomalies, "repeated_failure_pattern")
+		outcome.RootCauseHints = append(outcome.RootCauseHints, "The current failure fingerprint matches a previous execution failure.")
 	}
 
 	remaining := maxAttempts - attemptNo
@@ -100,6 +106,7 @@ func summarizeAttemptOutcome(
 		}
 	}
 
+	outcome.RootCauseHints = dedupe(outcome.RootCauseHints)
 	outcome.Confidence = deriveConfidence(outcome.Status, codexSucceeded, validation, outcome.Anomalies)
 	return outcome
 }
@@ -243,6 +250,55 @@ func retrySuggestionsFor(classification execresult.FailureClassification) []stri
 	}
 }
 
+func detectRootCauseHints(
+	classification execresult.FailureClassification,
+	codexResult cli.Result,
+	runErr error,
+	validation execresult.ValidationSummary,
+) []string {
+	hints := make([]string, 0, 4)
+
+	switch classification {
+	case execresult.FailureClassificationValidationFailure:
+		hints = append(hints, "One or more validation commands failed after the implementation step.")
+	case execresult.FailureClassificationCodexExecutionFailed:
+		hints = append(hints, "The Codex execution step did not finish cleanly before validation succeeded.")
+	}
+
+	if runErr != nil {
+		hints = append(hints, firstSentence(runErr.Error()))
+	}
+	if codexResult.TimedOut {
+		hints = append(hints, "The Codex command timed out before finishing.")
+	}
+	if !codexResult.Success() {
+		hints = append(hints, firstSentence(firstNonEmpty(codexResult.Stderr, codexResult.Error, codexResult.Stdout)))
+	}
+
+	for _, command := range validation.Commands {
+		if command.Passed {
+			continue
+		}
+		switch command.Kind {
+		case "test":
+			hints = append(hints, fmt.Sprintf("Test validation failed in %s.", command.Label))
+		case "lint":
+			hints = append(hints, fmt.Sprintf("Lint validation failed in %s.", command.Label))
+		default:
+			hints = append(hints, fmt.Sprintf("Validation failed in %s.", command.Label))
+		}
+		if snippet := firstSentence(command.ErrorHint); snippet != "" {
+			hints = append(hints, snippet)
+		}
+	}
+
+	if validation.Passed > 0 && validation.Failed > 0 {
+		hints = append(hints, "Some validation passed, which suggests the implementation is partially complete.")
+	}
+
+	return dedupe(hints)
+}
+
 func deriveConfidence(
 	status execresult.Status,
 	codexSucceeded bool,
@@ -313,6 +369,8 @@ func buildTerminalExecutionResult(
 	changedFiles []string,
 	promptFile string,
 	maxAttempts int,
+	branchStrategy string,
+	workspaceCleaned bool,
 ) execresult.ExecutionResult {
 	attemptCount := len(attempts)
 	if attemptCount == 0 {
@@ -320,6 +378,7 @@ func buildTerminalExecutionResult(
 	}
 
 	lastAttempt := attemptOutcome{
+		RetryCount:     spec.RetryCount,
 		CodexSucceeded: status == execresult.StatusSucceeded || status == execresult.StatusPartialSuccess,
 		Validation:     validation,
 	}
@@ -340,7 +399,7 @@ func buildTerminalExecutionResult(
 		if failureClassification == execresult.FailureClassificationNone {
 			failureClassification = execresult.FailureClassificationRepeatedPattern
 		}
-	} else if failureReason != "" {
+	} else if strings.TrimSpace(failureReason) != "" {
 		retry.Reason = "Automatic retries are complete for this task."
 	}
 
@@ -348,16 +407,39 @@ func buildTerminalExecutionResult(
 	if status == execresult.StatusSucceeded && len(anomalies) > 0 {
 		status = execresult.StatusPartialSuccess
 	}
+	if qualifiesForPartialSuccess(status, failureClassification, changedFiles) {
+		status = execresult.StatusPartialSuccess
+	}
 
 	validation = ensureValidationSummary(validation)
+	rootCauseHints := dedupe(append([]string(nil), lastAttempt.RootCauseHints...))
+	if strings.TrimSpace(failureReason) != "" && len(changedFiles) == 0 {
+		rootCauseHints = append(rootCauseHints, "No tracked repository changes were detected before the run exited.")
+	}
+	if !workspaceCleaned {
+		rootCauseHints = append(rootCauseHints, "Workspace cleanup did not complete cleanly after execution.")
+	}
+	if spec.RetryCount > 0 && strings.TrimSpace(spec.FailurePatternHint) != "" && spec.FailurePatternHint == lastAttempt.FailureFingerprint {
+		rootCauseHints = append(rootCauseHints, "The current failure fingerprint matches the previously recorded failure pattern hint.")
+	}
+	rootCauseHints = dedupe(rootCauseHints)
+
+	partial := buildPartialExecution(status, failureClassification, failureReason, changedFiles, anomalies)
 	confidence := deriveConfidence(status, lastAttempt.CodexSucceeded, validation, anomalies)
+	history := buildAttemptHistory(attempts)
+	failurePatternHint := strings.TrimSpace(firstNonEmpty(lastAttempt.FailureFingerprint, spec.FailurePatternHint))
+	retrySuggestions := dedupe(append([]string(nil), retry.Suggestions...))
 
 	return execresult.ExecutionResult{
 		Status:                status,
-		Summary:               buildExecutionSummary(status, attemptCount, validation, changedFiles, len(anomalies)),
-		ReasoningSummary:      buildReasoningSummary(spec, status, attempts, validation, changedFiles, anomalies),
+		Summary:               buildExecutionSummary(status, attemptCount, validation, changedFiles, len(anomalies), spec.ExecutionIndex, lastAttempt.RetryCount),
+		ReasoningSummary:      buildReasoningSummary(spec, status, attempts, validation, changedFiles, anomalies, partial),
 		FailureReason:         strings.TrimSpace(failureReason),
 		FailureClassification: failureClassification,
+		FailureType:           failureClassification,
+		RetrySuggestions:      retrySuggestions,
+		RootCauseHints:        rootCauseHints,
+		Partial:               partial,
 		Confidence:            confidence,
 		DetectedAnomalies:     anomalies,
 		Retry:                 retry,
@@ -366,6 +448,16 @@ func buildTerminalExecutionResult(
 		PromptFile:            strings.TrimSpace(promptFile),
 		JiraIssueKey:          spec.JiraIssueKey,
 		AttemptCount:          attemptCount,
+		Metadata: execresult.ExecutionMetadata{
+			RunID:              spec.RunID,
+			ExecutionIndex:     max(1, spec.ExecutionIndex),
+			RetryCount:         max(lastAttempt.RetryCount, spec.RetryCount),
+			FailurePatternHint: failurePatternHint,
+			BranchName:         spec.BranchName,
+			BranchStrategy:     strings.TrimSpace(branchStrategy),
+			WorkspaceCleaned:   workspaceCleaned,
+		},
+		History: history,
 		Evaluation: execresult.EvaluationHandoff{
 			Ready:               true,
 			State:               evaluationReadyState,
@@ -383,14 +475,97 @@ func ensureValidationSummary(summary execresult.ValidationSummary) execresult.Va
 	return summary
 }
 
+func qualifiesForPartialSuccess(
+	status execresult.Status,
+	failureClassification execresult.FailureClassification,
+	changedFiles []string,
+) bool {
+	if len(changedFiles) == 0 {
+		return false
+	}
+	if status != execresult.StatusValidationFailed && status != execresult.StatusFailed {
+		return false
+	}
+	return failureClassification == execresult.FailureClassificationValidationFailure ||
+		failureClassification == execresult.FailureClassificationCodexExecutionFailed ||
+		failureClassification == execresult.FailureClassificationArtifactFailure
+}
+
+func buildPartialExecution(
+	status execresult.Status,
+	failureClassification execresult.FailureClassification,
+	failureReason string,
+	changedFiles []string,
+	anomalies []string,
+) execresult.PartialExecution {
+	partial := execresult.PartialExecution{}
+
+	switch failureClassification {
+	case execresult.FailureClassificationConfigurationError:
+		partial.EarlyExit = true
+		partial.ReasonCode = "configuration_blocked"
+	case execresult.FailureClassificationWorkspaceFailure:
+		partial.EarlyExit = true
+		partial.ReasonCode = "workspace_preparation_failed"
+	case execresult.FailureClassificationArtifactFailure:
+		partial.ReasonCode = "artifact_recording_failed"
+	case execresult.FailureClassificationValidationFailure:
+		partial.ReasonCode = "validation_failed_after_changes"
+	case execresult.FailureClassificationCodexExecutionFailed:
+		partial.ReasonCode = "implementation_incomplete"
+	}
+
+	if status == execresult.StatusPartialSuccess || status == execresult.StatusValidationFailed || status == execresult.StatusFailed {
+		partial.IncompleteImplementation = len(changedFiles) > 0 && strings.TrimSpace(failureReason) != ""
+	}
+	if partial.ReasonCode == "" && len(anomalies) > 0 {
+		partial.ReasonCode = "execution_completed_with_anomalies"
+	}
+	partial.Reason = strings.TrimSpace(firstNonEmpty(failureReason, strings.Join(anomalies, ", ")))
+
+	return partial
+}
+
+func buildAttemptHistory(attempts []attemptOutcome) []execresult.AttemptSummary {
+	if len(attempts) == 0 {
+		return nil
+	}
+
+	history := make([]execresult.AttemptSummary, 0, len(attempts))
+	for _, attempt := range attempts {
+		history = append(history, execresult.AttemptSummary{
+			AttemptNo:              attempt.AttemptNo,
+			RetryCount:             attempt.RetryCount,
+			Status:                 attempt.Status,
+			Summary:                attempt.Summary,
+			FailureReason:          attempt.FailureReason,
+			FailureType:            attempt.FailureClassification,
+			FailureClassification:  attempt.FailureClassification,
+			DetectedAnomalies:      dedupe(attempt.Anomalies),
+			RetrySuggestions:       dedupe(attempt.RetrySuggestions),
+			RootCauseHints:         dedupe(attempt.RootCauseHints),
+			FailurePatternHint:     attempt.FailureFingerprint,
+			RepeatedFailurePattern: attempt.RepeatedFailurePattern,
+			Validation:             ensureValidationSummary(attempt.Validation),
+			Confidence:             attempt.Confidence,
+		})
+	}
+	return history
+}
+
 func buildExecutionSummary(
 	status execresult.Status,
 	attemptCount int,
 	validation execresult.ValidationSummary,
 	changedFiles []string,
 	anomalyCount int,
+	executionIndex int,
+	retryCount int,
 ) string {
-	summary := fmt.Sprintf("Execution finished with status %s after %d attempt(s).", status, attemptCount)
+	summary := fmt.Sprintf("Execution %d finished with status %s after %d attempt(s).", max(executionIndex, 1), status, attemptCount)
+	if retryCount > 0 {
+		summary += fmt.Sprintf(" Retry count at completion: %d.", retryCount)
+	}
 	if validation.Total > 0 {
 		summary += fmt.Sprintf(" Validation passed %d of %d command(s).", validation.Passed, validation.Total)
 	}
@@ -410,12 +585,16 @@ func buildReasoningSummary(
 	validation execresult.ValidationSummary,
 	changedFiles []string,
 	anomalies []string,
+	partial execresult.PartialExecution,
 ) string {
 	parts := []string{
-		fmt.Sprintf("Prepared execution for Jira issue %s on branch %s.", fallbackString(spec.JiraIssueKey, "unknown"), fallbackString(spec.BranchName, "unknown")),
+		fmt.Sprintf("Prepared execution %d for Jira issue %s on branch %s.", max(1, spec.ExecutionIndex), fallbackString(spec.JiraIssueKey, "unknown"), fallbackString(spec.BranchName, "unknown")),
 		fmt.Sprintf("Ran %d attempt(s) and finished in status %s.", max(1, len(attempts)), status),
 	}
 
+	if spec.RetryCount > 0 {
+		parts = append(parts, fmt.Sprintf("This run started with retry count %d.", spec.RetryCount))
+	}
 	if validation.Total > 0 {
 		parts = append(parts, fmt.Sprintf("Validation passed %d of %d command(s), including %d of %d test command(s).", validation.Passed, validation.Total, validation.TestPassed, validation.TestTotal))
 	} else {
@@ -428,6 +607,11 @@ func buildReasoningSummary(
 		parts = append(parts, "No tracked file changes were detected after execution.")
 	}
 
+	if partial.EarlyExit {
+		parts = append(parts, "The worker exited early with a structured reason before reaching a clean completion state.")
+	} else if partial.IncompleteImplementation {
+		parts = append(parts, "The implementation appears incomplete even though partial work was produced.")
+	}
 	if len(anomalies) > 0 {
 		parts = append(parts, "Anomalies: "+strings.Join(anomalies, ", ")+".")
 	}
@@ -445,6 +629,10 @@ func buildIntermediateRunPayload(result execresult.ExecutionResult, issueKey str
 		"files_changed":        result.FilesChanged,
 		"failure_reason":       result.FailureReason,
 		"failure_category":     result.FailureClassification,
+		"failure_type":         result.FailureType,
+		"retry_count":          result.Metadata.RetryCount,
+		"execution_index":      result.Metadata.ExecutionIndex,
+		"failure_pattern_hint": result.Metadata.FailurePatternHint,
 	}
 }
 
@@ -457,6 +645,9 @@ func buildTerminalRunPayload(result execresult.ExecutionResult) map[string]any {
 		"prompt_file":          result.PromptFile,
 		"evaluation_state":     result.Evaluation.State,
 		"ready_for_evaluation": result.Evaluation.Ready,
+		"retry_count":          result.Metadata.RetryCount,
+		"execution_index":      result.Metadata.ExecutionIndex,
+		"failure_pattern_hint": result.Metadata.FailurePatternHint,
 		"execution_result":     result,
 	}
 }
@@ -467,6 +658,10 @@ func buildSessionMetadata(result execresult.ExecutionResult) map[string]any {
 		"evaluation_state":        result.Evaluation.State,
 		"latest_execution_result": result,
 		"last_execution_at":       result.CompletedAt.Format(time.RFC3339),
+		"execution_index":         result.Metadata.ExecutionIndex,
+		"retry_count":             result.Metadata.RetryCount,
+		"failure_pattern_hint":    result.Metadata.FailurePatternHint,
+		"execution_history":       result.History,
 	}
 }
 
@@ -490,4 +685,32 @@ func fallbackString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func firstSentence(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	value = strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(value)
+	if idx := strings.Index(value, ". "); idx > 0 {
+		return strings.TrimSpace(value[:idx+1])
+	}
+	if idx := strings.Index(value, "; "); idx > 0 {
+		return strings.TrimSpace(value[:idx])
+	}
+	if len(value) > 160 {
+		return strings.TrimSpace(value[:160])
+	}
+	return value
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

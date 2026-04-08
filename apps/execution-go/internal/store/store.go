@@ -19,37 +19,44 @@ type Task struct {
 }
 
 type ClaimedTask struct {
-	Task         Task
-	SessionID    string
-	RunID        string
-	AttemptNo    int
-	JiraIssueKey string
-	WorkerName   string
+	Task               Task
+	SessionID          string
+	RunID              string
+	AttemptNo          int
+	RetryCount         int
+	ExecutionIndex     int
+	JiraIssueKey       string
+	WorkerName         string
+	FailurePatternHint string
 }
 
 type RunAttempt struct {
-	RunID     string
-	AttemptNo int
+	RunID      string
+	AttemptNo  int
+	RetryCount int
 }
 
 type FinalizeRunInput struct {
-	PlanID        string
-	TaskID        string
-	SessionID     string
-	RunID         string
-	RunStatus     string
-	SessionStatus string
-	TaskStatus    string
-	ArtifactPath  string
-	OutputPayload map[string]any
+	PlanID          string
+	TaskID          string
+	SessionID       string
+	RunID           string
+	RunStatus       string
+	FailureType     string
+	RetryCount      int
+	ConfidenceScore *float64
+	SessionStatus   string
+	TaskStatus      string
+	ArtifactPath    string
+	OutputPayload   map[string]any
 	SessionMetadata map[string]any
-	ErrorMessage  string
-	EventType     string
-	EventPayload  map[string]any
+	ErrorMessage    string
+	EventType       string
+	EventPayload    map[string]any
 }
 
 type TaskStore interface {
 	ClaimReadyTask(ctx context.Context, jiraIssueKey, workerName string) (*ClaimedTask, error)
-	StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, inputPayload map[string]any) (*RunAttempt, error)
+	StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, retryCount int, inputPayload map[string]any) (*RunAttempt, error)
 	FinalizeRun(ctx context.Context, input FinalizeRunInput) error
 }

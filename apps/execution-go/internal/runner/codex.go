@@ -12,12 +12,16 @@ import (
 )
 
 type CodexRequest struct {
-	WorkspacePath string
-	TaskID        string
-	BranchName    string
-	Goal          string
-	Prompt        string
-	AttemptNo     int
+	WorkspacePath      string
+	MetadataPath       string
+	TaskID             string
+	BranchName         string
+	Goal               string
+	Prompt             string
+	AttemptNo          int
+	RetryCount         int
+	ExecutionIndex     int
+	FailurePatternHint string
 }
 
 type CodexRunner struct {
@@ -39,7 +43,10 @@ func NewCodexRunner(command string, args []string, promptMode string, timeout ti
 }
 
 func (r *CodexRunner) Run(ctx context.Context, req CodexRequest) (cli.Result, string, error) {
-	promptDir := filepath.Join(req.WorkspacePath, ".execution")
+	promptDir := strings.TrimSpace(req.MetadataPath)
+	if promptDir == "" {
+		promptDir = filepath.Join(req.WorkspacePath, ".execution")
+	}
 	if err := os.MkdirAll(promptDir, 0o755); err != nil {
 		return cli.Result{}, "", fmt.Errorf("create prompt directory: %w", err)
 	}
@@ -73,6 +80,9 @@ func (r *CodexRunner) Run(ctx context.Context, req CodexRequest) (cli.Result, st
 			"CODEX_PROMPT_FILE=" + promptFile,
 			"CODEX_TASK_ID=" + req.TaskID,
 			"CODEX_BRANCH=" + req.BranchName,
+			"CODEX_RETRY_COUNT=" + fmt.Sprintf("%d", req.RetryCount),
+			"CODEX_EXECUTION_INDEX=" + fmt.Sprintf("%d", req.ExecutionIndex),
+			"CODEX_FAILURE_PATTERN_HINT=" + req.FailurePatternHint,
 		},
 	}
 	if r.promptMode == "stdin" {

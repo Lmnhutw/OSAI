@@ -12,19 +12,28 @@ import (
 )
 
 type PrepareRequest struct {
-	TaskID     string
-	IssueKey   string
-	Goal       string
-	RepoSource string
-	BaseBranch string
-	BranchName string
+	TaskID         string
+	IssueKey       string
+	Goal           string
+	RepoSource     string
+	BaseBranch     string
+	BranchName     string
+	RunID          string
+	ExecutionIndex int
+	RetryCount     int
 }
 
 type Workspace struct {
-	Path       string
-	RepoSource string
-	BaseBranch string
-	BranchName string
+	RootPath       string
+	Path           string
+	MetadataPath   string
+	RepoSource     string
+	BaseBranch     string
+	BranchName     string
+	BranchStrategy string
+	RunID          string
+	ExecutionIndex int
+	RetryCount     int
 }
 
 type Manager struct {
@@ -56,19 +65,32 @@ func (m *Manager) Prepare(ctx context.Context, req PrepareRequest) (Workspace, [
 		return Workspace{}, nil, fmt.Errorf("create workspace root: %w", err)
 	}
 
-	name := sanitize(firstNonEmpty(req.IssueKey, req.TaskID))
-	if name == "" {
-		name = "task"
-	}
-	workspacePath := filepath.Join(m.root, fmt.Sprintf("%s-%d", name, time.Now().UTC().Unix()))
+	runRoot := m.runRoot(req)
+	commands := make([]cli.Result, 0, 6)
 
-	commands := make([]cli.Result, 0, 2)
+	if info, err := os.Stat(runRoot); err == nil && info.IsDir() {
+		cleanupResult, cleanupErr := m.cleanupPath(runRoot)
+		commands = append(commands, cleanupResult)
+		if cleanupErr != nil {
+			return Workspace{}, commands, fmt.Errorf("reset stale workspace: %w", cleanupErr)
+		}
+	}
+
+	if err := os.MkdirAll(runRoot, 0o755); err != nil {
+		return Workspace{}, commands, fmt.Errorf("create run root: %w", err)
+	}
+
+	repoPath := filepath.Join(runRoot, "repo")
+	metadataPath := filepath.Join(runRoot, ".execution")
+	if err := os.MkdirAll(metadataPath, 0o755); err != nil {
+		return Workspace{}, commands, fmt.Errorf("create execution metadata directory: %w", err)
+	}
 
 	cloneArgs := []string{"clone"}
 	if strings.TrimSpace(req.BaseBranch) != "" {
 		cloneArgs = append(cloneArgs, "--branch", req.BaseBranch, "--single-branch")
 	}
-	cloneArgs = append(cloneArgs, repoSource, workspacePath)
+	cloneArgs = append(cloneArgs, repoSource, repoPath)
 
 	cloneResult := m.runGit(ctx, "", "git clone", cloneArgs...)
 	commands = append(commands, cloneResult)
@@ -76,17 +98,44 @@ func (m *Manager) Prepare(ctx context.Context, req PrepareRequest) (Workspace, [
 		return Workspace{}, commands, fmt.Errorf("git clone failed: %s", summarizeResult(cloneResult))
 	}
 
-	checkoutResult := m.runGit(ctx, workspacePath, "git checkout -b", "checkout", "-b", req.BranchName)
-	commands = append(commands, checkoutResult)
-	if !checkoutResult.Success() {
-		return Workspace{}, commands, fmt.Errorf("git checkout -b failed: %s", summarizeResult(checkoutResult))
+	branchStrategy := "created_from_base"
+	if strings.TrimSpace(req.BranchName) != "" {
+		startPoint := ""
+		lsRemoteResult := m.runGit(ctx, repoPath, "git ls-remote --heads", "ls-remote", "--heads", "origin", req.BranchName)
+		commands = append(commands, lsRemoteResult)
+		if lsRemoteResult.Success() && strings.TrimSpace(lsRemoteResult.Stdout) != "" {
+			fetchResult := m.runGit(ctx, repoPath, "git fetch origin", "fetch", "origin", req.BranchName)
+			commands = append(commands, fetchResult)
+			if fetchResult.Success() {
+				startPoint = "FETCH_HEAD"
+				branchStrategy = "reused_remote_branch"
+			} else {
+				branchStrategy = "regenerated_from_base"
+			}
+		}
+
+		checkoutArgs := []string{"checkout", "-B", req.BranchName}
+		if startPoint != "" {
+			checkoutArgs = append(checkoutArgs, startPoint)
+		}
+		checkoutResult := m.runGit(ctx, repoPath, "git checkout -B", checkoutArgs...)
+		commands = append(commands, checkoutResult)
+		if !checkoutResult.Success() {
+			return Workspace{}, commands, fmt.Errorf("git checkout -B failed: %s", summarizeResult(checkoutResult))
+		}
 	}
 
 	return Workspace{
-		Path:       workspacePath,
-		RepoSource: repoSource,
-		BaseBranch: req.BaseBranch,
-		BranchName: req.BranchName,
+		RootPath:       runRoot,
+		Path:           repoPath,
+		MetadataPath:   metadataPath,
+		RepoSource:     repoSource,
+		BaseBranch:     req.BaseBranch,
+		BranchName:     req.BranchName,
+		BranchStrategy: branchStrategy,
+		RunID:          strings.TrimSpace(req.RunID),
+		ExecutionIndex: max(req.ExecutionIndex, 1),
+		RetryCount:     max(req.RetryCount, 0),
 	}, commands, nil
 }
 
@@ -103,14 +152,54 @@ func (m *Manager) ChangedFiles(ctx context.Context, workspacePath string) ([]str
 		if line == "" {
 			continue
 		}
+		path := line
 		if len(line) > 3 {
-			files = append(files, strings.TrimSpace(line[3:]))
+			path = strings.TrimSpace(line[3:])
+		}
+		if isInternalExecutionPath(path) {
 			continue
 		}
-		files = append(files, line)
+		files = append(files, path)
 	}
 
 	return files, result
+}
+
+func (m *Manager) Cleanup(ctx context.Context, ws Workspace) (cli.Result, error) {
+	target := strings.TrimSpace(ws.RootPath)
+	if target == "" {
+		target = strings.TrimSpace(ws.Path)
+		if target != "" {
+			target = filepath.Dir(target)
+		}
+	}
+
+	startedAt := time.Now()
+	result := cli.Result{
+		Label:      "workspace cleanup",
+		Dir:        target,
+		StartedAt:  startedAt,
+		FinishedAt: startedAt,
+		ExitCode:   -1,
+	}
+	if target == "" {
+		result.Error = "workspace cleanup target is empty"
+		return result, fmt.Errorf("workspace cleanup target is empty")
+	}
+
+	if err := ctx.Err(); err != nil {
+		result.Error = err.Error()
+		return result, err
+	}
+
+	cleanupResult, cleanupErr := m.cleanupPath(target)
+	if strings.TrimSpace(cleanupResult.Label) == "" {
+		cleanupResult.Label = "workspace cleanup"
+	}
+	cleanupResult.StartedAt = startedAt
+	cleanupResult.FinishedAt = time.Now()
+	cleanupResult.Duration = cleanupResult.FinishedAt.Sub(startedAt)
+	return cleanupResult, cleanupErr
 }
 
 func (m *Manager) runGit(parent context.Context, dir, label string, args ...string) cli.Result {
@@ -122,6 +211,86 @@ func (m *Manager) runGit(parent context.Context, dir, label string, args ...stri
 		Name:  "git",
 		Args:  args,
 	})
+}
+
+func (m *Manager) runRoot(req PrepareRequest) string {
+	name := sanitize(firstNonEmpty(req.IssueKey, req.TaskID))
+	if name == "" {
+		name = "task"
+	}
+	runID := sanitize(shortToken(firstNonEmpty(req.RunID, "run")))
+	if runID == "" {
+		runID = "run"
+	}
+
+	return filepath.Join(
+		m.root,
+		fmt.Sprintf(
+			"%s-exec-%03d-retry-%02d-%s",
+			name,
+			max(req.ExecutionIndex, 1),
+			max(req.RetryCount, 0),
+			runID,
+		),
+	)
+}
+
+func (m *Manager) cleanupPath(target string) (cli.Result, error) {
+	startedAt := time.Now()
+	result := cli.Result{
+		Label:       "workspace cleanup",
+		Dir:         target,
+		CommandLine: "cleanup workspace",
+		StartedAt:   startedAt,
+		ExitCode:    -1,
+	}
+
+	if err := m.ensureWithinRoot(target); err != nil {
+		result.Error = err.Error()
+		result.FinishedAt = time.Now()
+		result.Duration = result.FinishedAt.Sub(startedAt)
+		return result, err
+	}
+
+	if err := os.RemoveAll(target); err != nil {
+		result.Error = err.Error()
+		result.FinishedAt = time.Now()
+		result.Duration = result.FinishedAt.Sub(startedAt)
+		return result, fmt.Errorf("remove workspace: %w", err)
+	}
+
+	result.ExitCode = 0
+	result.FinishedAt = time.Now()
+	result.Duration = result.FinishedAt.Sub(startedAt)
+	return result, nil
+}
+
+func (m *Manager) ensureWithinRoot(target string) error {
+	rootAbs, err := filepath.Abs(m.root)
+	if err != nil {
+		return fmt.Errorf("resolve workspace root: %w", err)
+	}
+	targetAbs, err := filepath.Abs(target)
+	if err != nil {
+		return fmt.Errorf("resolve workspace path: %w", err)
+	}
+
+	rel, err := filepath.Rel(rootAbs, targetAbs)
+	if err != nil {
+		return fmt.Errorf("compare workspace path: %w", err)
+	}
+	if rel == "." || rel == "" || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return fmt.Errorf("refusing to remove path outside workspace root: %s", targetAbs)
+	}
+	return nil
+}
+
+func isInternalExecutionPath(path string) bool {
+	normalized := strings.Trim(strings.ReplaceAll(path, "\\", "/"), "/")
+	return normalized == ".execution" ||
+		strings.HasPrefix(normalized, ".execution/") ||
+		normalized == ".git" ||
+		strings.HasPrefix(normalized, ".git/")
 }
 
 func sanitize(value string) string {
@@ -142,6 +311,14 @@ func sanitize(value string) string {
 	}
 
 	return strings.Trim(builder.String(), "-")
+}
+
+func shortToken(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= 12 {
+		return value
+	}
+	return value[:12]
 }
 
 func firstNonEmpty(values ...string) string {
@@ -165,4 +342,11 @@ func summarizeResult(result cli.Result) string {
 	default:
 		return strings.TrimSpace(result.Stdout)
 	}
+}
+
+func max(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }

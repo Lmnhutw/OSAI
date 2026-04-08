@@ -1,12 +1,18 @@
 package prompt
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 type Input struct {
 	TaskID                  string
 	JiraIssueKey            string
 	Title                   string
 	Goal                    string
+	ExecutionIndex          int
+	RetryCount              int
+	FailurePatternHint      string
 	Instructions            string
 	WorkingDirectory        string
 	BranchName              string
@@ -24,6 +30,10 @@ func Build(input Input) string {
 	writeField(&builder, "Jira Issue", input.JiraIssueKey)
 	writeField(&builder, "Title", input.Title)
 	writeField(&builder, "Goal", input.Goal)
+	if input.ExecutionIndex > 0 {
+		writeField(&builder, "Execution Index", strconv.Itoa(input.ExecutionIndex))
+	}
+	writeField(&builder, "Retry Count", strconv.Itoa(max(0, input.RetryCount)))
 	writeField(&builder, "Branch", input.BranchName)
 	writeField(&builder, "Working Directory", emptyAs(input.WorkingDirectory, "."))
 
@@ -43,6 +53,26 @@ func Build(input Input) string {
 	builder.WriteString("- Run the requested lint/test commands before finishing.\n")
 	builder.WriteString("- Leave the repository ready for review.\n")
 
+	if input.RetryCount > 0 || input.ExecutionIndex > 1 || strings.TrimSpace(input.FailurePatternHint) != "" {
+		builder.WriteString("\n## Retry Context\n\n")
+		retryLines := []string{
+			"Treat this as a retry-aware execution and keep the change set narrow and verifiable.",
+			"Do not repeat the same failure path without new evidence or a materially different fix.",
+			"Be explicit about the root cause before claiming the task is complete.",
+			"Use stricter validation discipline: focus on the exact failing commands and confirm they pass before finishing.",
+		}
+		if input.RetryCount > 0 {
+			retryLines = append(retryLines, "Current retry count: "+strconv.Itoa(input.RetryCount))
+		}
+		if input.ExecutionIndex > 1 {
+			retryLines = append(retryLines, "This task has been executed before; preserve prior work and avoid destructive resets.")
+		}
+		if hint := strings.TrimSpace(input.FailurePatternHint); hint != "" {
+			retryLines = append(retryLines, "Prior failure pattern hint: "+hint)
+		}
+		writeList(&builder, retryLines, "")
+	}
+
 	if len(input.AdditionalInstructions) > 0 {
 		builder.WriteString("\n## Additional Instructions\n\n")
 		writeList(&builder, input.AdditionalInstructions, "")
@@ -57,6 +87,9 @@ func Build(input Input) string {
 	builder.WriteString("- Make the required code changes.\n")
 	builder.WriteString("- Leave the repository in a testable state.\n")
 	builder.WriteString("- Summarize what changed and any remaining risks.\n")
+	if input.RetryCount > 0 {
+		builder.WriteString("- Call out what changed relative to the previous failed attempt.\n")
+	}
 
 	return builder.String()
 }
@@ -103,4 +136,11 @@ func emptyAs(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func max(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }

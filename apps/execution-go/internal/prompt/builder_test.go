@@ -13,6 +13,9 @@ func TestBuildIncludesRetryContext(t *testing.T) {
 		JiraIssueKey:            "OPS-99",
 		Title:                   "Build execution worker",
 		Goal:                    "Implement the Go execution worker",
+		ExecutionIndex:          2,
+		RetryCount:              1,
+		FailurePatternHint:      "validation_failure|test-1|failing test",
 		Instructions:            "Create the required packages and tests.",
 		WorkingDirectory:        "apps/execution-go",
 		BranchName:              "codex/ops-99-worker",
@@ -26,7 +29,9 @@ func TestBuildIncludesRetryContext(t *testing.T) {
 		"# Codex Execution Task",
 		"## Instructions",
 		"## Acceptance Criteria",
+		"## Retry Context",
 		"## Previous Attempt Findings",
+		"Prior failure pattern hint: validation_failure|test-1|failing test",
 		"lint-1 failed with exit code 1",
 	} {
 		if !strings.Contains(output, expected) {

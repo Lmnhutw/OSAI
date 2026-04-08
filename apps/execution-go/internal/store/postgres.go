@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,10 +80,45 @@ RETURNING t.id::text, t.plan_id::text, t.position, t.task_type, t.title, t.instr
 		return nil, fmt.Errorf("claim task: %w", err)
 	}
 
+	retryCount := extractRetryCount(task.InputPayload)
+
+	var executionIndex int
+	if err := tx.QueryRow(ctx, `
+SELECT COUNT(*) + 1
+FROM task_sessions
+WHERE task_id = $1::uuid
+`, task.ID).Scan(&executionIndex); err != nil {
+		return nil, fmt.Errorf("load execution index: %w", err)
+	}
+
+	failurePatternHint := ""
+	err = tx.QueryRow(ctx, `
+SELECT COALESCE(
+           NULLIF(er.output_payload#>>'{execution_result,metadata,failure_pattern_hint}', ''),
+           NULLIF(er.output_payload#>>'{execution_result,retry,failure_fingerprint}', ''),
+           NULLIF(er.output_payload->>'failure_pattern_hint', ''),
+           NULLIF(er.failure_type, '')
+       )
+FROM execution_runs er
+JOIN task_sessions ts ON ts.id = er.task_session_id
+WHERE ts.task_id = $1::uuid
+ORDER BY COALESCE(er.finished_at, er.created_at) DESC
+LIMIT 1
+`, task.ID).Scan(&failurePatternHint)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("load previous failure pattern hint: %w", err)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		failurePatternHint = ""
+	}
+
 	metadata := map[string]any{
-		"jira_issue_key": jiraIssueKey,
-		"worker_name":    workerName,
-		"claimed_at":     time.Now().UTC().Format(time.RFC3339),
+		"jira_issue_key":       jiraIssueKey,
+		"worker_name":          workerName,
+		"claimed_at":           time.Now().UTC().Format(time.RFC3339),
+		"execution_index":      executionIndex,
+		"retry_count":          retryCount,
+		"failure_pattern_hint": failurePatternHint,
 	}
 
 	var sessionID string
@@ -97,10 +133,10 @@ RETURNING id::text
 
 	var runID string
 	err = tx.QueryRow(ctx, `
-INSERT INTO execution_runs (task_session_id, attempt_no, status, worker_name, input_payload, started_at, created_at, updated_at)
-VALUES ($1::uuid, 1, 'running', $2, $3::jsonb, NOW(), NOW(), NOW())
+INSERT INTO execution_runs (task_session_id, attempt_no, status, worker_name, input_payload, retry_count, started_at, created_at, updated_at)
+VALUES ($1::uuid, 1, 'running', $2, $3::jsonb, $4, NOW(), NOW(), NOW())
 RETURNING id::text
-`, sessionID, workerName, marshalJSON(task.InputPayload)).Scan(&runID)
+`, sessionID, workerName, marshalJSON(task.InputPayload), retryCount).Scan(&runID)
 	if err != nil {
 		return nil, fmt.Errorf("insert execution run: %w", err)
 	}
@@ -118,16 +154,19 @@ VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'execution-go', 'task_claimed', 
 	}
 
 	return &ClaimedTask{
-		Task:         task,
-		SessionID:    sessionID,
-		RunID:        runID,
-		AttemptNo:    1,
-		JiraIssueKey: jiraIssueKey,
-		WorkerName:   workerName,
+		Task:               task,
+		SessionID:          sessionID,
+		RunID:              runID,
+		AttemptNo:          1,
+		RetryCount:         retryCount,
+		ExecutionIndex:     executionIndex,
+		JiraIssueKey:       jiraIssueKey,
+		WorkerName:         workerName,
+		FailurePatternHint: failurePatternHint,
 	}, nil
 }
 
-func (s *PostgresStore) StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, inputPayload map[string]any) (*RunAttempt, error) {
+func (s *PostgresStore) StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, retryCount int, inputPayload map[string]any) (*RunAttempt, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin retry transaction: %w", err)
@@ -136,26 +175,28 @@ func (s *PostgresStore) StartRetryRun(ctx context.Context, planID, taskID, sessi
 
 	var runID string
 	var attemptNo int
+	var persistedRetryCount int
 	err = tx.QueryRow(ctx, `
 WITH next_attempt AS (
     SELECT COALESCE(MAX(attempt_no), 0) + 1 AS attempt_no
     FROM execution_runs
     WHERE task_session_id = $1::uuid
 )
-INSERT INTO execution_runs (task_session_id, attempt_no, status, worker_name, input_payload, started_at, created_at, updated_at)
-SELECT $1::uuid, next_attempt.attempt_no, 'running', $2, $3::jsonb, NOW(), NOW(), NOW()
+INSERT INTO execution_runs (task_session_id, attempt_no, status, worker_name, input_payload, retry_count, started_at, created_at, updated_at)
+SELECT $1::uuid, next_attempt.attempt_no, 'running', $2, $3::jsonb, $4, NOW(), NOW(), NOW()
 FROM next_attempt
-RETURNING id::text, attempt_no
-`, sessionID, workerName, marshalJSON(inputPayload)).Scan(&runID, &attemptNo)
+RETURNING id::text, attempt_no, retry_count
+`, sessionID, workerName, marshalJSON(inputPayload), retryCount).Scan(&runID, &attemptNo, &persistedRetryCount)
 	if err != nil {
 		return nil, fmt.Errorf("insert retry run: %w", err)
 	}
 
 	eventPayload := map[string]any{
-		"task_id":    taskID,
-		"session_id": sessionID,
-		"attempt_no": attemptNo,
-		"worker":     workerName,
+		"task_id":     taskID,
+		"session_id":  sessionID,
+		"attempt_no":  attemptNo,
+		"retry_count": persistedRetryCount,
+		"worker":      workerName,
 	}
 
 	_, err = tx.Exec(ctx, `
@@ -170,7 +211,7 @@ VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'execution-go', 'retry_started',
 		return nil, fmt.Errorf("commit retry transaction: %w", err)
 	}
 
-	return &RunAttempt{RunID: runID, AttemptNo: attemptNo}, nil
+	return &RunAttempt{RunID: runID, AttemptNo: attemptNo, RetryCount: persistedRetryCount}, nil
 }
 
 func (s *PostgresStore) FinalizeRun(ctx context.Context, input FinalizeRunInput) error {
@@ -186,10 +227,13 @@ SET status = $2,
     artifact_path = NULLIF($3, ''),
     output_payload = $4::jsonb,
     error_message = NULLIF($5, ''),
+    failure_type = NULLIF($6, ''),
+    retry_count = $7,
+    confidence_score = $8,
     finished_at = NOW(),
     updated_at = NOW()
 WHERE id = $1::uuid
-`, input.RunID, input.RunStatus, input.ArtifactPath, marshalJSON(input.OutputPayload), input.ErrorMessage)
+`, input.RunID, input.RunStatus, input.ArtifactPath, marshalJSON(input.OutputPayload), input.ErrorMessage, input.FailureType, input.RetryCount, input.ConfidenceScore)
 	if err != nil {
 		return fmt.Errorf("update execution run: %w", err)
 	}
@@ -278,4 +322,45 @@ func marshalJSON(value any) string {
 
 func rollback(ctx context.Context, tx pgx.Tx) {
 	_ = tx.Rollback(ctx)
+}
+
+func extractRetryCount(payload map[string]any) int {
+	if payload == nil {
+		return 0
+	}
+
+	for _, key := range []string{"retry_count", "retryCount"} {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case int:
+			if typed > 0 {
+				return typed
+			}
+		case int32:
+			if typed > 0 {
+				return int(typed)
+			}
+		case int64:
+			if typed > 0 {
+				return int(typed)
+			}
+		case float64:
+			if typed > 0 {
+				return int(typed)
+			}
+		case json.Number:
+			if parsed, err := typed.Int64(); err == nil && parsed > 0 {
+				return int(parsed)
+			}
+		case string:
+			if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+
+	return 0
 }

@@ -54,7 +54,7 @@ func (w *Writer) Write(ctx context.Context, report Report) (Artifact, error) {
 		return Artifact{}, fmt.Errorf("create artifact directory: %w", err)
 	}
 
-	fileName := fmt.Sprintf("%s-%s.md", sanitize(report.TaskID), now.Format("150405"))
+	fileName := artifactFileName(report, now)
 	path := filepath.Join(subdir, fileName)
 
 	if err := os.WriteFile(path, []byte(render(report)), 0o644); err != nil {
@@ -101,6 +101,12 @@ func render(report Report) string {
 		builder.WriteString("- Attempts: ")
 		builder.WriteString(fmt.Sprintf("%d", report.Execution.AttemptCount))
 		builder.WriteString("\n")
+		builder.WriteString("- Execution Index: ")
+		builder.WriteString(fmt.Sprintf("%d", report.Execution.Metadata.ExecutionIndex))
+		builder.WriteString("\n")
+		builder.WriteString("- Retry Count: ")
+		builder.WriteString(fmt.Sprintf("%d", report.Execution.Metadata.RetryCount))
+		builder.WriteString("\n")
 		builder.WriteString("- Evaluation State: ")
 		builder.WriteString(fallback(report.Execution.Evaluation.State, "unknown"))
 		builder.WriteString("\n")
@@ -109,11 +115,43 @@ func render(report Report) string {
 			builder.WriteString(string(report.Execution.FailureClassification))
 			builder.WriteString("\n")
 		}
+		if strings.TrimSpace(string(report.Execution.FailureType)) != "" {
+			builder.WriteString("- Failure Type: ")
+			builder.WriteString(string(report.Execution.FailureType))
+			builder.WriteString("\n")
+		}
 		if strings.TrimSpace(report.Execution.FailureReason) != "" {
 			builder.WriteString("- Failure Reason: ")
 			builder.WriteString(report.Execution.FailureReason)
 			builder.WriteString("\n")
 		}
+
+		builder.WriteString("\n## Execution Metadata\n\n")
+		metadataLines := []string{
+			fmt.Sprintf("Run ID: %s", fallback(report.Execution.Metadata.RunID, "unknown")),
+			fmt.Sprintf("Execution index: %d", report.Execution.Metadata.ExecutionIndex),
+			fmt.Sprintf("Retry count: %d", report.Execution.Metadata.RetryCount),
+			fmt.Sprintf("Branch name: %s", fallback(report.Execution.Metadata.BranchName, "unknown")),
+			fmt.Sprintf("Branch strategy: %s", fallback(report.Execution.Metadata.BranchStrategy, "unknown")),
+			fmt.Sprintf("Workspace cleaned: %t", report.Execution.Metadata.WorkspaceCleaned),
+		}
+		if strings.TrimSpace(report.Execution.Metadata.FailurePatternHint) != "" {
+			metadataLines = append(metadataLines, "Failure pattern hint: "+report.Execution.Metadata.FailurePatternHint)
+		}
+		writeList(&builder, metadataLines, "- No execution metadata was recorded.")
+
+		builder.WriteString("\n## Partial Execution\n\n")
+		partialLines := []string{
+			fmt.Sprintf("Early exit: %t", report.Execution.Partial.EarlyExit),
+			fmt.Sprintf("Incomplete implementation: %t", report.Execution.Partial.IncompleteImplementation),
+		}
+		if strings.TrimSpace(report.Execution.Partial.ReasonCode) != "" {
+			partialLines = append(partialLines, "Reason code: "+report.Execution.Partial.ReasonCode)
+		}
+		if strings.TrimSpace(report.Execution.Partial.Reason) != "" {
+			partialLines = append(partialLines, "Reason: "+report.Execution.Partial.Reason)
+		}
+		writeList(&builder, partialLines, "- No partial execution details were recorded.")
 
 		builder.WriteString("\n## Reasoning Summary\n\n")
 		builder.WriteString(fallback(report.Execution.ReasoningSummary, "No reasoning summary was recorded."))
@@ -124,6 +162,9 @@ func render(report Report) string {
 
 		builder.WriteString("\n## Detected Anomalies\n\n")
 		writeList(&builder, report.Execution.DetectedAnomalies, "- No anomalies were detected.")
+
+		builder.WriteString("\n## Root Cause Hints\n\n")
+		writeList(&builder, report.Execution.RootCauseHints, "- No root cause hints were recorded.")
 
 		builder.WriteString("\n## Retry Guidance\n\n")
 		retryLines := []string{
@@ -140,6 +181,9 @@ func render(report Report) string {
 		retryLines = append(retryLines, report.Execution.Retry.Suggestions...)
 		writeList(&builder, retryLines, "- No retry guidance was recorded.")
 
+		builder.WriteString("\n## Retry Suggestions\n\n")
+		writeList(&builder, report.Execution.RetrySuggestions, "- No retry suggestions were recorded.")
+
 		builder.WriteString("\n## Validation Summary\n\n")
 		validationLines := []string{
 			fmt.Sprintf("Total commands: %d", report.Execution.Validation.Total),
@@ -149,6 +193,31 @@ func render(report Report) string {
 			fmt.Sprintf("Tests passed: %d/%d", report.Execution.Validation.TestPassed, report.Execution.Validation.TestTotal),
 		}
 		writeList(&builder, validationLines, "- No validation summary was recorded.")
+
+		builder.WriteString("\n## Attempt History\n\n")
+		if len(report.Execution.History) == 0 {
+			builder.WriteString("- No attempt history was recorded.\n")
+		} else {
+			for _, attempt := range report.Execution.History {
+				builder.WriteString("### Attempt ")
+				builder.WriteString(fmt.Sprintf("%d", attempt.AttemptNo))
+				builder.WriteString("\n\n")
+				attemptLines := []string{
+					fmt.Sprintf("Retry count: %d", attempt.RetryCount),
+					fmt.Sprintf("Status: %s", attempt.Status),
+					fmt.Sprintf("Summary: %s", fallback(attempt.Summary, "n/a")),
+				}
+				if strings.TrimSpace(string(attempt.FailureType)) != "" {
+					attemptLines = append(attemptLines, "Failure type: "+string(attempt.FailureType))
+				}
+				if strings.TrimSpace(attempt.FailureReason) != "" {
+					attemptLines = append(attemptLines, "Failure reason: "+attempt.FailureReason)
+				}
+				attemptLines = append(attemptLines, attempt.RootCauseHints...)
+				writeList(&builder, attemptLines, "- No attempt details were recorded.")
+				builder.WriteString("\n")
+			}
+		}
 
 		builder.WriteString("\n## Structured JSON Result\n\n```json\n")
 		builder.WriteString(renderJSON(report.Execution))
@@ -269,4 +338,29 @@ func renderJSON(value any) string {
 		return "{}"
 	}
 	return string(payload)
+}
+
+func artifactFileName(report Report, now time.Time) string {
+	base := sanitize(report.TaskID)
+	if report.Execution == nil {
+		return fmt.Sprintf("%s-%s.md", base, now.Format("150405"))
+	}
+
+	executionIndex := report.Execution.Metadata.ExecutionIndex
+	if executionIndex < 1 {
+		executionIndex = 1
+	}
+	retryCount := report.Execution.Metadata.RetryCount
+	if retryCount < 0 {
+		retryCount = 0
+	}
+
+	runToken := sanitize(report.Execution.Metadata.RunID)
+	if len(runToken) > 10 {
+		runToken = runToken[:10]
+	}
+	if runToken == "" {
+		return fmt.Sprintf("%s-exec-%03d-retry-%02d-%s.md", base, executionIndex, retryCount, now.Format("150405"))
+	}
+	return fmt.Sprintf("%s-exec-%03d-retry-%02d-%s-%s.md", base, executionIndex, retryCount, runToken, now.Format("150405"))
 }
