@@ -1,4 +1,4 @@
--- Phase 2 PostgreSQL schema for the orchestration system.
+-- Phase 3 PostgreSQL schema for the orchestration system.
 -- This file is a full schema snapshot and is intentionally language-agnostic:
 -- no ORM assumptions, UUID primary keys, plain SQL constraints, and JSONB only
 -- where flexible payloads are useful to both Python and Go services.
@@ -6,10 +6,13 @@
 -- Relationship summary:
 --   projects -> project_requirements
 --   projects -> memory_items
+--   projects -> failure_patterns
 --   projects -> plans -> tasks -> task_sessions -> execution_runs
+--   projects -> plans -> tasks -> task_history
 --   task_sessions -> task_session_memory_links -> memory_items
 --   tasks/task_sessions/execution_runs -> evaluation_results
 --   tasks -> task_dependencies (self-referential dependency graph)
+--   tasks -> task_links (self-referential chaining graph)
 --   plans -> approvals
 --   events can point at project, plan, task, task_session, and/or execution_run
 --
@@ -18,6 +21,7 @@
 --   * status columns are TEXT on purpose to keep rollouts simple in Phase 1.
 --   * artifact_path is stored on task_sessions, execution_runs, and events for logs.
 --   * memory_items adds a lightweight full-text retrieval path for curated knowledge.
+--   * task_links generalizes chaining without removing legacy task_dependencies.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -164,6 +168,64 @@ CREATE UNIQUE INDEX uq_task_dependencies_task_depends_on
 CREATE INDEX idx_task_dependencies_depends_on_task_id
     ON task_dependencies (depends_on_task_id);
 
+-- Generalized task chaining graph for loops, retries, and follow-up work.
+-- task_dependencies remains intact for backward compatibility with earlier phases.
+CREATE TABLE task_links (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    parent_task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    child_task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    link_type text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_task_links_not_self CHECK (parent_task_id <> child_task_id),
+    CONSTRAINT chk_task_links_type CHECK (
+        link_type IN ('follow_up', 'dependency', 'retry', 'bugfix')
+    )
+);
+
+COMMENT ON TABLE task_links IS
+    'General task-link graph for follow-up, dependency, retry, and bugfix relationships.';
+COMMENT ON COLUMN task_links.parent_task_id IS
+    'Upstream or source task in the relationship. For dependency links, this is the prerequisite task.';
+COMMENT ON COLUMN task_links.child_task_id IS
+    'Downstream or derived task in the relationship. For dependency links, this is the blocked task.';
+COMMENT ON COLUMN task_links.link_type IS
+    'Relationship type: follow_up, dependency, retry, or bugfix.';
+
+CREATE UNIQUE INDEX uq_task_links_parent_child_type
+    ON task_links (parent_task_id, child_task_id, link_type);
+
+CREATE INDEX idx_task_links_parent_task_link_type_created_at
+    ON task_links (parent_task_id, link_type, created_at DESC);
+
+CREATE INDEX idx_task_links_child_task_link_type_created_at
+    ON task_links (child_task_id, link_type, created_at DESC);
+
+-- Loop history is append-only so control-plane decisions remain auditable.
+CREATE TABLE task_history (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    state text NOT NULL,
+    decision text,
+    "timestamp" timestamptz NOT NULL DEFAULT NOW()
+);
+
+COMMENT ON TABLE task_history IS
+    'Append-only task loop history capturing state transitions and control-plane decisions over time.';
+COMMENT ON COLUMN task_history.task_id IS
+    'Task whose loop state changed.';
+COMMENT ON COLUMN task_history.state IS
+    'Application-managed loop state such as queued, running, waiting, retrying, or failed.';
+COMMENT ON COLUMN task_history.decision IS
+    'Optional decision or rationale that explains the transition.';
+COMMENT ON COLUMN task_history."timestamp" IS
+    'Time when the state transition or loop decision was recorded.';
+
+CREATE INDEX idx_task_history_task_timestamp
+    ON task_history (task_id, "timestamp" DESC);
+
+CREATE INDEX idx_task_history_timestamp
+    ON task_history ("timestamp" DESC);
+
 -- Phase 1 approvals are scoped to plans.
 CREATE TABLE approvals (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -309,6 +371,7 @@ CREATE TABLE execution_runs (
     error_message text,
     failure_type text,
     retry_count integer NOT NULL DEFAULT 0,
+    last_retry_at timestamptz,
     confidence_score numeric(5,4),
     started_at timestamptz,
     finished_at timestamptz,
@@ -337,6 +400,8 @@ COMMENT ON COLUMN execution_runs.failure_type IS
     'Optional normalized failure classification such as timeout, validation_error, or tool_error.';
 COMMENT ON COLUMN execution_runs.retry_count IS
     'Zero-based retry counter. attempt_no stays unchanged for backward compatibility.';
+COMMENT ON COLUMN execution_runs.last_retry_at IS
+    'Timestamp when this execution attempt was most recently scheduled or launched as a retry.';
 COMMENT ON COLUMN execution_runs.confidence_score IS
     'Optional confidence signal on a 0-1 scale for dispatch or execution quality.';
 
@@ -346,9 +411,16 @@ CREATE UNIQUE INDEX uq_execution_runs_session_attempt
 CREATE INDEX idx_execution_runs_session_status_created_at
     ON execution_runs (task_session_id, status, created_at DESC);
 
+CREATE INDEX idx_execution_runs_task_session_created_at
+    ON execution_runs (task_session_id, created_at DESC);
+
 -- Supports feeds and dashboards that show the most recent runs, including queued runs with no started_at yet.
 CREATE INDEX idx_execution_runs_created_at
     ON execution_runs (created_at DESC);
+
+CREATE INDEX idx_execution_runs_last_retry_at
+    ON execution_runs (last_retry_at DESC)
+    WHERE last_retry_at IS NOT NULL;
 
 CREATE INDEX idx_execution_runs_started_at
     ON execution_runs (started_at DESC);
@@ -410,6 +482,41 @@ CREATE INDEX idx_evaluation_results_execution_run_type_created_at
 
 CREATE TRIGGER trg_evaluation_results_set_updated_at
 BEFORE UPDATE ON evaluation_results
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- Aggregated recurring failures at project scope. This allows loop controllers
+-- to detect repeated breakage without scanning the full execution history.
+CREATE TABLE failure_patterns (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    signature text NOT NULL,
+    frequency integer NOT NULL DEFAULT 1,
+    last_seen_at timestamptz NOT NULL DEFAULT NOW(),
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_failure_patterns_frequency CHECK (frequency >= 1)
+);
+
+COMMENT ON TABLE failure_patterns IS
+    'Aggregated recurring failure signatures at project scope for retry control and diagnostics.';
+COMMENT ON COLUMN failure_patterns.project_id IS
+    'Project that owns this normalized failure signature.';
+COMMENT ON COLUMN failure_patterns.signature IS
+    'Normalized signature, hash input, or classifier key used to group similar failures.';
+COMMENT ON COLUMN failure_patterns.frequency IS
+    'Number of observed occurrences for this failure signature.';
+COMMENT ON COLUMN failure_patterns.last_seen_at IS
+    'Most recent observation time for this failure signature.';
+
+CREATE UNIQUE INDEX uq_failure_patterns_project_signature
+    ON failure_patterns (project_id, signature);
+
+CREATE INDEX idx_failure_patterns_project_last_seen_at
+    ON failure_patterns (project_id, last_seen_at DESC);
+
+CREATE TRIGGER trg_failure_patterns_set_updated_at
+BEFORE UPDATE ON failure_patterns
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
