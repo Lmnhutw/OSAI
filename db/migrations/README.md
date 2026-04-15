@@ -8,6 +8,8 @@ This directory is laid out for plain SQL migrations without assuming a specific 
 - `000002_phase2_memory_and_evals.down.sql` removes the Phase 2 additions.
 - `000003_phase3_autonomous_loops.up.sql` adds loop history, task chaining, retry timestamps, and recurring failure patterns.
 - `000003_phase3_autonomous_loops.down.sql` removes the Phase 3 additions.
+- `000004_phase4_selective_autonomy.up.sql` adds selective-autonomy decisions, overrides, task classifications, execution contracts, and richer autonomy audit fields.
+- `000004_phase4_selective_autonomy.down.sql` removes the Phase 4 additions.
 - `../schema/schema.sql` is the full schema snapshot and should stay aligned with the latest migration state.
 
 The file naming pattern is compatible with common raw-SQL migration runners, including tools that expect `*.up.sql` and `*.down.sql` pairs.
