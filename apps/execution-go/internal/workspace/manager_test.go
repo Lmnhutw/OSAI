@@ -66,3 +66,12 @@ func TestRunRootIncludesExecutionMetadata(t *testing.T) {
 		t.Fatalf("expected run root to contain shortened run id, got %q", path)
 	}
 }
+
+func TestResolveWithinRootRejectsEscapingPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if _, err := ResolveWithinRoot(root, "..\\outside"); err == nil {
+		t.Fatal("expected ResolveWithinRoot to reject a path that escapes the workspace root")
+	}
+}

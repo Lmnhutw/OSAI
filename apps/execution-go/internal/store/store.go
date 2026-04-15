@@ -55,8 +55,19 @@ type FinalizeRunInput struct {
 	EventPayload    map[string]any
 }
 
+type RecordEventInput struct {
+	PlanID        string
+	TaskID        string
+	SessionID     string
+	RunID         string
+	EventType     string
+	ArtifactPath  string
+	EventPayload  map[string]any
+}
+
 type TaskStore interface {
 	ClaimReadyTask(ctx context.Context, jiraIssueKey, workerName string) (*ClaimedTask, error)
 	StartRetryRun(ctx context.Context, planID, taskID, sessionID, workerName string, retryCount int, inputPayload map[string]any) (*RunAttempt, error)
 	FinalizeRun(ctx context.Context, input FinalizeRunInput) error
+	RecordEvent(ctx context.Context, input RecordEventInput) error
 }

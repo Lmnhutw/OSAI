@@ -280,6 +280,28 @@ VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, 'execution-go', $5, NULLIF($6, '
 	return nil
 }
 
+func (s *PostgresStore) RecordEvent(ctx context.Context, input RecordEventInput) error {
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO events (plan_id, task_id, task_session_id, execution_run_id, event_source, event_type, artifact_path, payload, occurred_at, created_at)
+VALUES (
+    NULLIF($1, '')::uuid,
+    NULLIF($2, '')::uuid,
+    NULLIF($3, '')::uuid,
+    NULLIF($4, '')::uuid,
+    'execution-go',
+    $5,
+    NULLIF($6, ''),
+    $7::jsonb,
+    NOW(),
+    NOW()
+)
+`, input.PlanID, input.TaskID, input.SessionID, input.RunID, input.EventType, input.ArtifactPath, marshalJSON(input.EventPayload))
+	if err != nil {
+		return fmt.Errorf("record event %s: %w", input.EventType, err)
+	}
+	return nil
+}
+
 func scanTask(row pgx.Row) (Task, error) {
 	var task Task
 	var inputPayloadRaw []byte

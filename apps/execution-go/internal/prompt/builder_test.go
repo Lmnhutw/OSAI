@@ -23,15 +23,20 @@ func TestBuildIncludesRetryContext(t *testing.T) {
 		AllowedPaths:            []string{"apps/execution-go"},
 		AdditionalInstructions:  []string{"Do not touch Python services."},
 		PreviousAttemptFindings: []string{"lint-1 failed with exit code 1"},
+		ExecutionMode:           "execute_with_validation",
+		ContractActions:         []string{"prepare_workspace", "run_codex", "write_workspace", "run_validation"},
+		AutonomyReasoningRef:    "autonomy://task/task-1",
 	})
 
 	for _, expected := range []string{
 		"# Codex Execution Task",
 		"## Instructions",
 		"## Acceptance Criteria",
+		"## Execution Contract",
 		"## Retry Context",
 		"## Previous Attempt Findings",
 		"Prior failure pattern hint: validation_failure|test-1|failing test",
+		"Allowed worker action: run_validation",
 		"lint-1 failed with exit code 1",
 	} {
 		if !strings.Contains(output, expected) {

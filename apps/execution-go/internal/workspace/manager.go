@@ -266,23 +266,60 @@ func (m *Manager) cleanupPath(target string) (cli.Result, error) {
 }
 
 func (m *Manager) ensureWithinRoot(target string) error {
-	rootAbs, err := filepath.Abs(m.root)
+	rel, err := relativeWithinRoot(m.root, target)
 	if err != nil {
-		return fmt.Errorf("resolve workspace root: %w", err)
+		return err
+	}
+	if rel == "." || rel == "" {
+		targetAbs, _ := filepath.Abs(target)
+		return fmt.Errorf("refusing to remove path outside workspace root: %s", targetAbs)
+	}
+	return nil
+}
+
+func ResolveWithinRoot(root, relativePath string) (string, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
+	}
+
+	resolved := rootAbs
+	if strings.TrimSpace(relativePath) != "" && strings.TrimSpace(relativePath) != "." {
+		resolved = filepath.Join(rootAbs, relativePath)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+
+	rel, err := relativeWithinRoot(rootAbs, resolved)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("path escapes workspace root: %s", resolved)
+	}
+	return resolved, nil
+}
+
+func relativeWithinRoot(root, target string) (string, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace root: %w", err)
 	}
 	targetAbs, err := filepath.Abs(target)
 	if err != nil {
-		return fmt.Errorf("resolve workspace path: %w", err)
+		return "", fmt.Errorf("resolve workspace path: %w", err)
 	}
 
 	rel, err := filepath.Rel(rootAbs, targetAbs)
 	if err != nil {
-		return fmt.Errorf("compare workspace path: %w", err)
+		return "", fmt.Errorf("compare workspace path: %w", err)
 	}
-	if rel == "." || rel == "" || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
-		return fmt.Errorf("refusing to remove path outside workspace root: %s", targetAbs)
+	if strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("refusing to access path outside workspace root: %s", targetAbs)
 	}
-	return nil
+	return rel, nil
 }
 
 func isInternalExecutionPath(path string) bool {

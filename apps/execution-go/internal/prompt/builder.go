@@ -20,6 +20,9 @@ type Input struct {
 	AllowedPaths            []string
 	AdditionalInstructions  []string
 	PreviousAttemptFindings []string
+	ExecutionMode           string
+	ContractActions         []string
+	AutonomyReasoningRef    string
 }
 
 func Build(input Input) string {
@@ -36,6 +39,7 @@ func Build(input Input) string {
 	writeField(&builder, "Retry Count", strconv.Itoa(max(0, input.RetryCount)))
 	writeField(&builder, "Branch", input.BranchName)
 	writeField(&builder, "Working Directory", emptyAs(input.WorkingDirectory, "."))
+	writeField(&builder, "Execution Mode", input.ExecutionMode)
 
 	builder.WriteString("\n## Instructions\n\n")
 	builder.WriteString(strings.TrimSpace(input.Instructions))
@@ -52,6 +56,18 @@ func Build(input Input) string {
 	}
 	builder.WriteString("- Run the requested lint/test commands before finishing.\n")
 	builder.WriteString("- Leave the repository ready for review.\n")
+
+	if len(input.ContractActions) > 0 || strings.TrimSpace(input.AutonomyReasoningRef) != "" {
+		builder.WriteString("\n## Execution Contract\n\n")
+		if len(input.ContractActions) > 0 {
+			writeList(&builder, prefixAll(input.ContractActions, "Allowed worker action: "), "")
+		}
+		if strings.TrimSpace(input.AutonomyReasoningRef) != "" {
+			builder.WriteString("- Autonomy reasoning reference: ")
+			builder.WriteString(strings.TrimSpace(input.AutonomyReasoningRef))
+			builder.WriteString("\n")
+		}
+	}
 
 	if input.RetryCount > 0 || input.ExecutionIndex > 1 || strings.TrimSpace(input.FailurePatternHint) != "" {
 		builder.WriteString("\n## Retry Context\n\n")

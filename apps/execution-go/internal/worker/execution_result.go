@@ -218,6 +218,31 @@ func normalizeFingerprint(value string) string {
 
 func retrySuggestionsFor(classification execresult.FailureClassification) []string {
 	switch classification {
+	case execresult.FailureClassificationPolicyRejected:
+		return []string{
+			"Refresh the execution contract from the control plane before retrying this task.",
+			"Do not bypass the recorded autonomy decision with local worker overrides.",
+		}
+	case execresult.FailureClassificationApprovalMissing:
+		return []string{
+			"Obtain and record human approval in the execution contract before retrying.",
+			"Preserve the current task context so the next run can reuse the same contract scope safely.",
+		}
+	case execresult.FailureClassificationAutonomyForbidden:
+		return []string{
+			"Reduce the requested worker actions or update the execution contract explicitly.",
+			"Do not retry until the control plane grants the required autonomous permissions.",
+		}
+	case execresult.FailureClassificationSensitiveScopeBlocked:
+		return []string{
+			"Escalate to a human operator for a new contract that explicitly covers the sensitive scope.",
+			"Do not retry by broadening local write scope inside the worker.",
+		}
+	case execresult.FailureClassificationRetryLimitExceeded:
+		return []string{
+			"Stop automatic retries and request a new contract or operator intervention.",
+			"Attach the latest artifact and failure fingerprint when escalating the task.",
+		}
 	case execresult.FailureClassificationConfigurationError:
 		return []string{
 			"Add or correct lint and test commands before retrying this task.",
@@ -371,11 +396,10 @@ func buildTerminalExecutionResult(
 	maxAttempts int,
 	branchStrategy string,
 	workspaceCleaned bool,
+	safetyChecks []execresult.SafetyCheck,
+	telemetry []execresult.TelemetryEntry,
 ) execresult.ExecutionResult {
 	attemptCount := len(attempts)
-	if attemptCount == 0 {
-		attemptCount = 1
-	}
 
 	lastAttempt := attemptOutcome{
 		RetryCount:     spec.RetryCount,
@@ -431,6 +455,7 @@ func buildTerminalExecutionResult(
 	retrySuggestions := dedupe(append([]string(nil), retry.Suggestions...))
 
 	return execresult.ExecutionResult{
+		TaskID:                spec.TaskID,
 		Status:                status,
 		Summary:               buildExecutionSummary(status, attemptCount, validation, changedFiles, len(anomalies), spec.ExecutionIndex, lastAttempt.RetryCount),
 		ReasoningSummary:      buildReasoningSummary(spec, status, attempts, validation, changedFiles, anomalies, partial),
@@ -448,8 +473,17 @@ func buildTerminalExecutionResult(
 		PromptFile:            strings.TrimSpace(promptFile),
 		JiraIssueKey:          spec.JiraIssueKey,
 		AttemptCount:          attemptCount,
+		Contract:              spec.Contract,
+		PolicySnapshot:        spec.PolicySnapshot,
+		SafetyChecks:          append([]execresult.SafetyCheck(nil), safetyChecks...),
+		Telemetry:             append([]execresult.TelemetryEntry(nil), telemetry...),
 		Metadata: execresult.ExecutionMetadata{
 			RunID:              spec.RunID,
+			TaskID:             spec.TaskID,
+			WorkerID:           spec.WorkerID,
+			ContractID:         spec.Contract.ID,
+			PolicyVersion:      firstNonEmpty(spec.PolicySnapshot.Version, spec.Contract.PolicyVersion),
+			ExecutionMode:      string(spec.Contract.ExecutionMode),
 			ExecutionIndex:     max(1, spec.ExecutionIndex),
 			RetryCount:         max(lastAttempt.RetryCount, spec.RetryCount),
 			FailurePatternHint: failurePatternHint,
@@ -513,6 +547,21 @@ func buildPartialExecution(
 		partial.ReasonCode = "validation_failed_after_changes"
 	case execresult.FailureClassificationCodexExecutionFailed:
 		partial.ReasonCode = "implementation_incomplete"
+	case execresult.FailureClassificationPolicyRejected:
+		partial.EarlyExit = true
+		partial.ReasonCode = "policy_rejected"
+	case execresult.FailureClassificationApprovalMissing:
+		partial.EarlyExit = true
+		partial.ReasonCode = "approval_missing"
+	case execresult.FailureClassificationAutonomyForbidden:
+		partial.EarlyExit = true
+		partial.ReasonCode = "autonomy_forbidden"
+	case execresult.FailureClassificationSensitiveScopeBlocked:
+		partial.EarlyExit = true
+		partial.ReasonCode = "sensitive_scope_blocked"
+	case execresult.FailureClassificationRetryLimitExceeded:
+		partial.EarlyExit = true
+		partial.ReasonCode = "retry_limit_exceeded"
 	}
 
 	if status == execresult.StatusPartialSuccess || status == execresult.StatusValidationFailed || status == execresult.StatusFailed {
@@ -562,7 +611,7 @@ func buildExecutionSummary(
 	executionIndex int,
 	retryCount int,
 ) string {
-	summary := fmt.Sprintf("Execution %d finished with status %s after %d attempt(s).", max(executionIndex, 1), status, attemptCount)
+	summary := fmt.Sprintf("Execution %d finished with status %s after %d attempt(s).", max(executionIndex, 1), status, max(0, attemptCount))
 	if retryCount > 0 {
 		summary += fmt.Sprintf(" Retry count at completion: %d.", retryCount)
 	}
@@ -589,7 +638,7 @@ func buildReasoningSummary(
 ) string {
 	parts := []string{
 		fmt.Sprintf("Prepared execution %d for Jira issue %s on branch %s.", max(1, spec.ExecutionIndex), fallbackString(spec.JiraIssueKey, "unknown"), fallbackString(spec.BranchName, "unknown")),
-		fmt.Sprintf("Ran %d attempt(s) and finished in status %s.", max(1, len(attempts)), status),
+		fmt.Sprintf("Ran %d attempt(s) in mode %s and finished in status %s.", max(0, len(attempts)), fallbackString(string(spec.Contract.ExecutionMode), "unspecified"), status),
 	}
 
 	if spec.RetryCount > 0 {
@@ -622,6 +671,7 @@ func buildReasoningSummary(
 func buildIntermediateRunPayload(result execresult.ExecutionResult, issueKey string) map[string]any {
 	return map[string]any{
 		"status":               string(result.Status),
+		"task_id":              result.TaskID,
 		"jira_issue_key":       issueKey,
 		"execution_result":     result,
 		"evaluation_state":     result.Evaluation.State,
@@ -632,6 +682,9 @@ func buildIntermediateRunPayload(result execresult.ExecutionResult, issueKey str
 		"failure_type":         result.FailureType,
 		"retry_count":          result.Metadata.RetryCount,
 		"execution_index":      result.Metadata.ExecutionIndex,
+		"execution_mode":       result.Metadata.ExecutionMode,
+		"contract_id":          result.Metadata.ContractID,
+		"policy_version":       result.Metadata.PolicyVersion,
 		"failure_pattern_hint": result.Metadata.FailurePatternHint,
 	}
 }
@@ -639,6 +692,7 @@ func buildIntermediateRunPayload(result execresult.ExecutionResult, issueKey str
 func buildTerminalRunPayload(result execresult.ExecutionResult) map[string]any {
 	return map[string]any{
 		"status":               string(result.Status),
+		"task_id":              result.TaskID,
 		"jira_issue_key":       result.JiraIssueKey,
 		"artifact_path":        result.ArtifactPath,
 		"files_changed":        result.FilesChanged,
@@ -647,6 +701,9 @@ func buildTerminalRunPayload(result execresult.ExecutionResult) map[string]any {
 		"ready_for_evaluation": result.Evaluation.Ready,
 		"retry_count":          result.Metadata.RetryCount,
 		"execution_index":      result.Metadata.ExecutionIndex,
+		"execution_mode":       result.Metadata.ExecutionMode,
+		"contract_id":          result.Metadata.ContractID,
+		"policy_version":       result.Metadata.PolicyVersion,
 		"failure_pattern_hint": result.Metadata.FailurePatternHint,
 		"execution_result":     result,
 	}
@@ -660,6 +717,9 @@ func buildSessionMetadata(result execresult.ExecutionResult) map[string]any {
 		"last_execution_at":       result.CompletedAt.Format(time.RFC3339),
 		"execution_index":         result.Metadata.ExecutionIndex,
 		"retry_count":             result.Metadata.RetryCount,
+		"execution_mode":          result.Metadata.ExecutionMode,
+		"contract_id":             result.Metadata.ContractID,
+		"policy_version":          result.Metadata.PolicyVersion,
 		"failure_pattern_hint":    result.Metadata.FailurePatternHint,
 		"execution_history":       result.History,
 	}

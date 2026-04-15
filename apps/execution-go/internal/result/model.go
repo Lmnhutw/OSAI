@@ -18,14 +18,29 @@ const (
 type FailureClassification string
 
 const (
-	FailureClassificationNone                 FailureClassification = ""
-	FailureClassificationConfigurationError   FailureClassification = "configuration_error"
-	FailureClassificationWorkspaceFailure     FailureClassification = "workspace_failure"
-	FailureClassificationCodexExecutionFailed FailureClassification = "codex_execution_failed"
-	FailureClassificationValidationFailure    FailureClassification = "validation_failure"
-	FailureClassificationArtifactFailure      FailureClassification = "artifact_failure"
-	FailureClassificationRepeatedPattern      FailureClassification = "repeated_failure_pattern"
-	FailureClassificationUnknown              FailureClassification = "unknown_failure"
+	FailureClassificationNone                  FailureClassification = ""
+	FailureClassificationConfigurationError    FailureClassification = "configuration_error"
+	FailureClassificationWorkspaceFailure      FailureClassification = "workspace_failure"
+	FailureClassificationCodexExecutionFailed  FailureClassification = "codex_execution_failed"
+	FailureClassificationValidationFailure     FailureClassification = "validation_failure"
+	FailureClassificationArtifactFailure       FailureClassification = "artifact_failure"
+	FailureClassificationRepeatedPattern       FailureClassification = "repeated_failure_pattern"
+	FailureClassificationPolicyRejected        FailureClassification = "policy_rejected"
+	FailureClassificationApprovalMissing       FailureClassification = "approval_missing"
+	FailureClassificationAutonomyForbidden     FailureClassification = "autonomy_forbidden"
+	FailureClassificationSensitiveScopeBlocked FailureClassification = "sensitive_scope_blocked"
+	FailureClassificationRetryLimitExceeded    FailureClassification = "retry_limit_exceeded"
+	FailureClassificationUnknown               FailureClassification = "unknown_failure"
+)
+
+type ExecutionMode string
+
+const (
+	ExecutionModeInspectOnly           ExecutionMode = "inspect_only"
+	ExecutionModeDraftChanges          ExecutionMode = "draft_changes"
+	ExecutionModeExecuteWithWrite      ExecutionMode = "execute_with_write"
+	ExecutionModeExecuteWithValidation ExecutionMode = "execute_with_validation"
+	ExecutionModeBlocked               ExecutionMode = "blocked"
 )
 
 type ConfidenceLevel string
@@ -76,6 +91,85 @@ type RetryGuidance struct {
 	Suggestions            []string `json:"suggestions,omitempty"`
 }
 
+type ApprovalState struct {
+	Required   bool       `json:"required"`
+	Approved   bool       `json:"approved"`
+	Reference  string     `json:"reference,omitempty"`
+	ApprovedBy string     `json:"approved_by,omitempty"`
+	ApprovedAt *time.Time `json:"approved_at,omitempty"`
+}
+
+type RetryAllowance struct {
+	Allowed  bool `json:"allowed"`
+	MaxRetry int  `json:"max_retry"`
+}
+
+type BranchPolicy struct {
+	BaseBranch            string   `json:"base_branch,omitempty"`
+	TargetBranch          string   `json:"target_branch,omitempty"`
+	ApprovedTargetBranch  string   `json:"approved_target_branch,omitempty"`
+	AllowedTargetBranches []string `json:"allowed_target_branches,omitempty"`
+	RequireApprovedTarget bool     `json:"require_approved_target"`
+	Approved              bool     `json:"approved"`
+}
+
+type WritePermissions struct {
+	AllowWrite        bool     `json:"allow_write"`
+	ReadOnly          bool     `json:"read_only"`
+	DryRun            bool     `json:"dry_run"`
+	WorkspaceOnly     bool     `json:"workspace_only"`
+	NoAutonomousWrite bool     `json:"no_autonomous_write"`
+	AllowedPaths      []string `json:"allowed_paths,omitempty"`
+}
+
+type PolicySnapshot struct {
+	Version            string         `json:"version,omitempty"`
+	DecisionSource     string         `json:"decision_source,omitempty"`
+	AutonomyMode       string         `json:"autonomy_mode,omitempty"`
+	ApprovalRequired   bool           `json:"approval_required"`
+	ReviewRequired     bool           `json:"review_required"`
+	RetryAllowed       bool           `json:"retry_allowed"`
+	MaxRetry           int            `json:"max_retry"`
+	Block              bool           `json:"block"`
+	Escalate           bool           `json:"escalate"`
+	FinalAction        string         `json:"final_action,omitempty"`
+	AllowedActions     []string       `json:"allowed_actions,omitempty"`
+	ReasonCodes        []string       `json:"reason_codes,omitempty"`
+	TaskClassification string         `json:"task_classification,omitempty"`
+	TaskRiskLevel      string         `json:"task_risk_level,omitempty"`
+	SensitiveScope     []string       `json:"sensitive_scope,omitempty"`
+	SensitivePaths     []string       `json:"sensitive_paths,omitempty"`
+	ForbiddenActions   []string       `json:"forbidden_actions,omitempty"`
+	Evidence           map[string]any `json:"evidence,omitempty"`
+}
+
+type ExecutionContract struct {
+	ID                   string           `json:"id,omitempty"`
+	TaskID               string           `json:"task_id,omitempty"`
+	ExecutionMode        ExecutionMode    `json:"execution_mode,omitempty"`
+	AllowedActions       []string         `json:"allowed_actions,omitempty"`
+	Retry                RetryAllowance   `json:"retry"`
+	Branch               BranchPolicy     `json:"branch"`
+	Write                WritePermissions `json:"write"`
+	Approval             ApprovalState    `json:"approval"`
+	ExpiresAt            *time.Time       `json:"expires_at,omitempty"`
+	PolicyVersion        string           `json:"policy_version,omitempty"`
+	AutonomyReasoningRef string           `json:"autonomy_reasoning_ref,omitempty"`
+}
+
+type SafetyCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type TelemetryEntry struct {
+	Stage     string         `json:"stage"`
+	Status    string         `json:"status"`
+	Timestamp time.Time      `json:"timestamp"`
+	Details   map[string]any `json:"details,omitempty"`
+}
+
 type PartialExecution struct {
 	EarlyExit                bool   `json:"early_exit"`
 	IncompleteImplementation bool   `json:"incomplete_implementation"`
@@ -85,6 +179,11 @@ type PartialExecution struct {
 
 type ExecutionMetadata struct {
 	RunID              string `json:"run_id,omitempty"`
+	TaskID             string `json:"task_id,omitempty"`
+	WorkerID           string `json:"worker_id,omitempty"`
+	ContractID         string `json:"contract_id,omitempty"`
+	PolicyVersion      string `json:"policy_version,omitempty"`
+	ExecutionMode      string `json:"execution_mode,omitempty"`
 	ExecutionIndex     int    `json:"execution_index"`
 	RetryCount         int    `json:"retry_count"`
 	FailurePatternHint string `json:"failure_pattern_hint,omitempty"`
@@ -118,6 +217,7 @@ type EvaluationHandoff struct {
 }
 
 type ExecutionResult struct {
+	TaskID                string                `json:"task_id,omitempty"`
 	Status                Status                `json:"status"`
 	Summary               string                `json:"summary"`
 	ReasoningSummary      string                `json:"reasoning_summary,omitempty"`
@@ -136,6 +236,10 @@ type ExecutionResult struct {
 	ArtifactPath          string                `json:"artifact_path,omitempty"`
 	JiraIssueKey          string                `json:"jira_issue_key,omitempty"`
 	AttemptCount          int                   `json:"attempt_count"`
+	Contract              ExecutionContract     `json:"contract"`
+	PolicySnapshot        PolicySnapshot        `json:"policy_snapshot"`
+	SafetyChecks          []SafetyCheck         `json:"safety_checks,omitempty"`
+	Telemetry             []TelemetryEntry      `json:"telemetry,omitempty"`
 	Metadata              ExecutionMetadata     `json:"metadata"`
 	History               []AttemptSummary      `json:"history,omitempty"`
 	Evaluation            EvaluationHandoff     `json:"evaluation"`

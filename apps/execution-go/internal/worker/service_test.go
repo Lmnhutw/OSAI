@@ -41,6 +41,7 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 			BranchName:     "codex/ops-1",
 			BranchStrategy: "created_from_base",
 		},
+		changedFiles: []string{"internal/worker/service.go"},
 	}
 	fakeCodex := &stubCodex{
 		results: []cli.Result{
@@ -82,6 +83,7 @@ func TestExecuteClaimedTaskRetriesAndCompletes(t *testing.T) {
 				"base_branch":        "main",
 				"working_dir":        ".",
 				"acceptanceCriteria": []any{"All tests pass"},
+				"execution_contract": validExecutionContract("task-1", execresult.ExecutionModeExecuteWithValidation, 1),
 			},
 		},
 		SessionID:      "session-1",
@@ -176,7 +178,7 @@ func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
 			MetadataPath:   "C:/tmp/ws-run/.execution",
 			BranchName:     "codex/ops-1",
 			BranchStrategy: "created_from_base",
-		}},
+		}, changedFiles: []string{"internal/worker/service.go"}},
 		&stubCodex{results: []cli.Result{
 			{Label: "codex", CommandLine: "codex exec", ExitCode: 0},
 			{Label: "codex", CommandLine: "codex exec", ExitCode: 0},
@@ -195,8 +197,9 @@ func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
 			Title:        "Build worker",
 			Instructions: "Implement the execution worker.",
 			InputPayload: map[string]any{
-				"goal":          "Implement worker",
-				"test_commands": []any{"go test ./..."},
+				"goal":               "Implement worker",
+				"test_commands":      []any{"go test ./..."},
+				"execution_contract": validExecutionContract("task-1", execresult.ExecutionModeExecuteWithValidation, 2),
 			},
 		},
 		SessionID:      "session-1",
@@ -228,6 +231,211 @@ func TestExecuteClaimedTaskStopsOnRepeatedFailurePattern(t *testing.T) {
 	}
 }
 
+func TestExecuteClaimedTaskRejectsMissingApproval(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		WorkerName:         "worker-1",
+		MaxAttempts:        2,
+		JiraRequestTimeout: time.Second,
+	}
+
+	fakeStore := &stubStore{}
+	fakeCodex := &stubCodex{}
+	fakeQuality := &stubQuality{}
+	service := NewService(
+		cfg,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&stubJira{},
+		fakeStore,
+		&stubWorkspace{ws: workspace.Workspace{
+			RootPath:       "C:/tmp/ws-run",
+			Path:           "C:/tmp/ws",
+			MetadataPath:   "C:/tmp/ws-run/.execution",
+			BranchName:     "codex/ops-1",
+			BranchStrategy: "created_from_base",
+		}},
+		fakeCodex,
+		fakeQuality,
+		&stubArtifactWriter{artifact: artifact.Artifact{RelativePath: "artifacts/execution-go/run.md"}},
+	)
+
+	contract := validExecutionContract("task-1", execresult.ExecutionModeExecuteWithValidation, 0)
+	approval := contract["approval"].(map[string]any)
+	approval["required"] = true
+	approval["approved"] = false
+
+	claimed := &store.ClaimedTask{
+		Task: store.Task{
+			ID:           "task-1",
+			PlanID:       "plan-1",
+			Title:        "Blocked worker",
+			Instructions: "Implement the execution worker.",
+			InputPayload: map[string]any{
+				"goal":               "Implement worker",
+				"test_commands":      []any{"go test ./..."},
+				"execution_contract": contract,
+			},
+		},
+		SessionID:      "session-1",
+		RunID:          "run-1",
+		AttemptNo:      1,
+		RetryCount:     0,
+		ExecutionIndex: 1,
+		JiraIssueKey:   "OPS-2",
+		WorkerName:     "worker-1",
+	}
+
+	if err := service.executeClaimedTask(context.Background(), jira.Issue{Key: "OPS-2", Summary: "Blocked worker"}, claimed); err != nil {
+		t.Fatalf("executeClaimedTask returned error: %v", err)
+	}
+	if fakeCodex.index != 0 {
+		t.Fatalf("expected approval rejection to skip Codex, got %d runs", fakeCodex.index)
+	}
+	if fakeQuality.index != 0 {
+		t.Fatalf("expected approval rejection to skip validation, got %d runs", fakeQuality.index)
+	}
+
+	executionResult, ok := fakeStore.finalizeCalls[0].OutputPayload["execution_result"].(execresult.ExecutionResult)
+	if !ok {
+		t.Fatalf("expected structured execution result, got %#v", fakeStore.finalizeCalls[0].OutputPayload["execution_result"])
+	}
+	if executionResult.FailureClassification != execresult.FailureClassificationApprovalMissing {
+		t.Fatalf("expected approval_missing classification, got %+v", executionResult)
+	}
+}
+
+func TestExecuteClaimedTaskInspectOnlySkipsCodexAndValidation(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		WorkerName:         "worker-1",
+		MaxAttempts:        1,
+		JiraRequestTimeout: time.Second,
+	}
+
+	fakeStore := &stubStore{}
+	fakeCodex := &stubCodex{}
+	fakeQuality := &stubQuality{}
+	service := NewService(
+		cfg,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&stubJira{},
+		fakeStore,
+		&stubWorkspace{ws: workspace.Workspace{
+			RootPath:       "C:/tmp/ws-run",
+			Path:           "C:/tmp/ws",
+			MetadataPath:   "C:/tmp/ws-run/.execution",
+			BranchName:     "codex/ops-3",
+			BranchStrategy: "created_from_base",
+		}, changedFiles: nil},
+		fakeCodex,
+		fakeQuality,
+		&stubArtifactWriter{artifact: artifact.Artifact{RelativePath: "artifacts/execution-go/run.md"}},
+	)
+
+	claimed := &store.ClaimedTask{
+		Task: store.Task{
+			ID:           "task-3",
+			PlanID:       "plan-1",
+			Title:        "Inspect worker",
+			Instructions: "Inspect the worker only.",
+			InputPayload: map[string]any{
+				"goal":               "Inspect worker",
+				"execution_contract": validExecutionContract("task-3", execresult.ExecutionModeInspectOnly, 0),
+			},
+		},
+		SessionID:      "session-3",
+		RunID:          "run-3",
+		AttemptNo:      1,
+		RetryCount:     0,
+		ExecutionIndex: 1,
+		JiraIssueKey:   "OPS-3",
+		WorkerName:     "worker-1",
+	}
+
+	if err := service.executeClaimedTask(context.Background(), jira.Issue{Key: "OPS-3", Summary: "Inspect worker"}, claimed); err != nil {
+		t.Fatalf("executeClaimedTask returned error: %v", err)
+	}
+	if fakeCodex.index != 0 {
+		t.Fatalf("expected inspect_only to skip Codex, got %d runs", fakeCodex.index)
+	}
+	if fakeQuality.index != 0 {
+		t.Fatalf("expected inspect_only to skip validation, got %d runs", fakeQuality.index)
+	}
+
+	executionResult, ok := fakeStore.finalizeCalls[0].OutputPayload["execution_result"].(execresult.ExecutionResult)
+	if !ok {
+		t.Fatalf("expected structured execution result, got %#v", fakeStore.finalizeCalls[0].OutputPayload["execution_result"])
+	}
+	if executionResult.Metadata.ExecutionMode != string(execresult.ExecutionModeInspectOnly) {
+		t.Fatalf("expected inspect_only execution mode, got %+v", executionResult.Metadata)
+	}
+	if executionResult.Status != execresult.StatusSucceeded && executionResult.Status != execresult.StatusPartialSuccess {
+		t.Fatalf("expected inspect-only run to complete without failure, got %+v", executionResult)
+	}
+}
+
+func TestExecuteClaimedTaskRejectsRetryLimitExceeded(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		WorkerName:         "worker-1",
+		MaxAttempts:        3,
+		JiraRequestTimeout: time.Second,
+	}
+
+	fakeStore := &stubStore{}
+	service := NewService(
+		cfg,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		&stubJira{},
+		fakeStore,
+		&stubWorkspace{ws: workspace.Workspace{
+			RootPath:       "C:/tmp/ws-run",
+			Path:           "C:/tmp/ws",
+			MetadataPath:   "C:/tmp/ws-run/.execution",
+			BranchName:     "codex/ops-4",
+			BranchStrategy: "created_from_base",
+		}},
+		&stubCodex{},
+		&stubQuality{},
+		&stubArtifactWriter{artifact: artifact.Artifact{RelativePath: "artifacts/execution-go/run.md"}},
+	)
+
+	claimed := &store.ClaimedTask{
+		Task: store.Task{
+			ID:           "task-4",
+			PlanID:       "plan-1",
+			Title:        "Retry capped worker",
+			Instructions: "Implement the worker.",
+			InputPayload: map[string]any{
+				"goal":               "Implement worker",
+				"execution_contract": validExecutionContract("task-4", execresult.ExecutionModeExecuteWithWrite, 1),
+			},
+		},
+		SessionID:      "session-4",
+		RunID:          "run-4",
+		AttemptNo:      1,
+		RetryCount:     2,
+		ExecutionIndex: 1,
+		JiraIssueKey:   "OPS-4",
+		WorkerName:     "worker-1",
+	}
+
+	if err := service.executeClaimedTask(context.Background(), jira.Issue{Key: "OPS-4", Summary: "Retry capped worker"}, claimed); err != nil {
+		t.Fatalf("executeClaimedTask returned error: %v", err)
+	}
+
+	executionResult, ok := fakeStore.finalizeCalls[0].OutputPayload["execution_result"].(execresult.ExecutionResult)
+	if !ok {
+		t.Fatalf("expected structured execution result, got %#v", fakeStore.finalizeCalls[0].OutputPayload["execution_result"])
+	}
+	if executionResult.FailureClassification != execresult.FailureClassificationRetryLimitExceeded {
+		t.Fatalf("expected retry_limit_exceeded classification, got %+v", executionResult)
+	}
+}
+
 type stubJira struct {
 	transitions []string
 	comments    []string
@@ -248,9 +456,10 @@ func (s *stubJira) AddComment(ctx context.Context, issueKey, body string) error 
 }
 
 type stubStore struct {
-	retryRun      *store.RunAttempt
-	finalizeCalls []store.FinalizeRunInput
-	retryCount    int
+	retryRun       *store.RunAttempt
+	finalizeCalls  []store.FinalizeRunInput
+	retryCount     int
+	recordedEvents []store.RecordEventInput
 }
 
 func (s *stubStore) ClaimReadyTask(ctx context.Context, jiraIssueKey, workerName string) (*store.ClaimedTask, error) {
@@ -267,9 +476,15 @@ func (s *stubStore) FinalizeRun(ctx context.Context, input store.FinalizeRunInpu
 	return nil
 }
 
+func (s *stubStore) RecordEvent(ctx context.Context, input store.RecordEventInput) error {
+	s.recordedEvents = append(s.recordedEvents, input)
+	return nil
+}
+
 type stubWorkspace struct {
-	ws          workspace.Workspace
-	cleanupRuns int
+	ws           workspace.Workspace
+	changedFiles []string
+	cleanupRuns  int
 }
 
 func (s *stubWorkspace) Prepare(ctx context.Context, req workspace.PrepareRequest) (workspace.Workspace, []cli.Result, error) {
@@ -277,7 +492,7 @@ func (s *stubWorkspace) Prepare(ctx context.Context, req workspace.PrepareReques
 }
 
 func (s *stubWorkspace) ChangedFiles(ctx context.Context, workspacePath string) ([]string, cli.Result) {
-	return []string{"internal/worker/service.go"}, cli.Result{Label: "git status", CommandLine: "git status --short", ExitCode: 0}
+	return append([]string(nil), s.changedFiles...), cli.Result{Label: "git status", CommandLine: "git status --short", ExitCode: 0}
 }
 
 func (s *stubWorkspace) Cleanup(ctx context.Context, ws workspace.Workspace) (cli.Result, error) {
@@ -315,4 +530,54 @@ type stubArtifactWriter struct {
 func (s *stubArtifactWriter) Write(ctx context.Context, report artifact.Report) (artifact.Artifact, error) {
 	s.report = report
 	return s.artifact, nil
+}
+
+func validExecutionContract(taskID string, mode execresult.ExecutionMode, maxRetry int) map[string]any {
+	allowWrite := mode == execresult.ExecutionModeDraftChanges || mode == execresult.ExecutionModeExecuteWithWrite || mode == execresult.ExecutionModeExecuteWithValidation
+	allowedActions := []any{"prepare_workspace"}
+	switch mode {
+	case execresult.ExecutionModeInspectOnly:
+		allowedActions = append(allowedActions, "inspect_workspace")
+	case execresult.ExecutionModeDraftChanges, execresult.ExecutionModeExecuteWithWrite:
+		allowedActions = append(allowedActions, "run_codex", "write_workspace")
+	case execresult.ExecutionModeExecuteWithValidation:
+		allowedActions = append(allowedActions, "run_codex", "write_workspace", "run_validation")
+	}
+
+	contract := map[string]any{
+		"id":              "contract-" + taskID,
+		"task_id":         taskID,
+		"execution_mode":  string(mode),
+		"allowed_actions": allowedActions,
+		"retry": map[string]any{
+			"allowed":   maxRetry > 0,
+			"max_retry": maxRetry,
+		},
+		"branch_policy": map[string]any{
+			"base_branch":             "main",
+			"target_branch":           "codex/" + taskID,
+			"approved_target_branch":  "codex/" + taskID,
+			"allowed_target_branches": []any{"codex/" + taskID},
+			"require_approved_target": allowWrite,
+			"approved":                true,
+		},
+		"write_permissions": map[string]any{
+			"allow_write":         allowWrite,
+			"read_only":           mode == execresult.ExecutionModeInspectOnly,
+			"dry_run":             false,
+			"workspace_only":      true,
+			"no_autonomous_write": false,
+			"allowed_paths":       []any{"internal/worker"},
+		},
+		"approval": map[string]any{
+			"required": false,
+			"approved": true,
+		},
+		"policy_version":         "phase4",
+		"autonomy_reasoning_ref": "autonomy://task/" + taskID,
+	}
+	if mode == execresult.ExecutionModeInspectOnly {
+		contract["retry"] = map[string]any{"allowed": false, "max_retry": 0}
+	}
+	return contract
 }

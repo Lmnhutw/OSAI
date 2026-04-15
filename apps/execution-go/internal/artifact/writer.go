@@ -107,6 +107,9 @@ func render(report Report) string {
 		builder.WriteString("- Retry Count: ")
 		builder.WriteString(fmt.Sprintf("%d", report.Execution.Metadata.RetryCount))
 		builder.WriteString("\n")
+		builder.WriteString("- Execution Mode: ")
+		builder.WriteString(fallback(report.Execution.Metadata.ExecutionMode, "unknown"))
+		builder.WriteString("\n")
 		builder.WriteString("- Evaluation State: ")
 		builder.WriteString(fallback(report.Execution.Evaluation.State, "unknown"))
 		builder.WriteString("\n")
@@ -129,6 +132,11 @@ func render(report Report) string {
 		builder.WriteString("\n## Execution Metadata\n\n")
 		metadataLines := []string{
 			fmt.Sprintf("Run ID: %s", fallback(report.Execution.Metadata.RunID, "unknown")),
+			fmt.Sprintf("Task ID: %s", fallback(report.Execution.Metadata.TaskID, "unknown")),
+			fmt.Sprintf("Worker ID: %s", fallback(report.Execution.Metadata.WorkerID, "unknown")),
+			fmt.Sprintf("Contract ID: %s", fallback(report.Execution.Metadata.ContractID, "unknown")),
+			fmt.Sprintf("Policy version: %s", fallback(report.Execution.Metadata.PolicyVersion, "unknown")),
+			fmt.Sprintf("Execution mode: %s", fallback(report.Execution.Metadata.ExecutionMode, "unknown")),
 			fmt.Sprintf("Execution index: %d", report.Execution.Metadata.ExecutionIndex),
 			fmt.Sprintf("Retry count: %d", report.Execution.Metadata.RetryCount),
 			fmt.Sprintf("Branch name: %s", fallback(report.Execution.Metadata.BranchName, "unknown")),
@@ -139,6 +147,61 @@ func render(report Report) string {
 			metadataLines = append(metadataLines, "Failure pattern hint: "+report.Execution.Metadata.FailurePatternHint)
 		}
 		writeList(&builder, metadataLines, "- No execution metadata was recorded.")
+
+		builder.WriteString("\n## Execution Contract\n\n")
+		contractLines := []string{
+			fmt.Sprintf("Contract ID: %s", fallback(report.Execution.Contract.ID, "unknown")),
+			fmt.Sprintf("Task ID: %s", fallback(report.Execution.Contract.TaskID, "unknown")),
+			fmt.Sprintf("Execution mode: %s", fallback(string(report.Execution.Contract.ExecutionMode), "unknown")),
+			fmt.Sprintf("Policy version: %s", fallback(report.Execution.Contract.PolicyVersion, "unknown")),
+			fmt.Sprintf("Write allowed: %t", report.Execution.Contract.Write.AllowWrite),
+			fmt.Sprintf("Read only: %t", report.Execution.Contract.Write.ReadOnly),
+			fmt.Sprintf("Dry run: %t", report.Execution.Contract.Write.DryRun),
+			fmt.Sprintf("Workspace only: %t", report.Execution.Contract.Write.WorkspaceOnly),
+			fmt.Sprintf("No autonomous write: %t", report.Execution.Contract.Write.NoAutonomousWrite),
+			fmt.Sprintf("Retry allowed: %t", report.Execution.Contract.Retry.Allowed),
+			fmt.Sprintf("Max retry: %d", report.Execution.Contract.Retry.MaxRetry),
+			fmt.Sprintf("Approval required: %t", report.Execution.Contract.Approval.Required),
+			fmt.Sprintf("Approval granted: %t", report.Execution.Contract.Approval.Approved),
+			fmt.Sprintf("Branch target: %s", fallback(report.Execution.Contract.Branch.TargetBranch, "unknown")),
+			fmt.Sprintf("Approved branch target: %s", fallback(report.Execution.Contract.Branch.ApprovedTargetBranch, "unknown")),
+		}
+		contractLines = append(contractLines, prefixAll(report.Execution.Contract.AllowedActions, "Allowed action: ")...)
+		contractLines = append(contractLines, prefixAll(report.Execution.Contract.Write.AllowedPaths, "Allowed write path: ")...)
+		if report.Execution.Contract.ExpiresAt != nil {
+			contractLines = append(contractLines, "Expires at: "+report.Execution.Contract.ExpiresAt.UTC().Format(time.RFC3339))
+		}
+		if report.Execution.Contract.Approval.ApprovedAt != nil {
+			contractLines = append(contractLines, "Approved at: "+report.Execution.Contract.Approval.ApprovedAt.UTC().Format(time.RFC3339))
+		}
+		if strings.TrimSpace(report.Execution.Contract.Approval.Reference) != "" {
+			contractLines = append(contractLines, "Approval reference: "+report.Execution.Contract.Approval.Reference)
+		}
+		if strings.TrimSpace(report.Execution.Contract.AutonomyReasoningRef) != "" {
+			contractLines = append(contractLines, "Autonomy reasoning reference: "+report.Execution.Contract.AutonomyReasoningRef)
+		}
+		writeList(&builder, contractLines, "- No execution contract was recorded.")
+
+		builder.WriteString("\n## Policy Snapshot\n\n")
+		policyLines := []string{
+			fmt.Sprintf("Version: %s", fallback(report.Execution.PolicySnapshot.Version, "unknown")),
+			fmt.Sprintf("Autonomy mode: %s", fallback(report.Execution.PolicySnapshot.AutonomyMode, "unknown")),
+			fmt.Sprintf("Approval required: %t", report.Execution.PolicySnapshot.ApprovalRequired),
+			fmt.Sprintf("Review required: %t", report.Execution.PolicySnapshot.ReviewRequired),
+			fmt.Sprintf("Retry allowed: %t", report.Execution.PolicySnapshot.RetryAllowed),
+			fmt.Sprintf("Max retry: %d", report.Execution.PolicySnapshot.MaxRetry),
+			fmt.Sprintf("Block: %t", report.Execution.PolicySnapshot.Block),
+			fmt.Sprintf("Escalate: %t", report.Execution.PolicySnapshot.Escalate),
+			fmt.Sprintf("Final action: %s", fallback(report.Execution.PolicySnapshot.FinalAction, "unknown")),
+			fmt.Sprintf("Task classification: %s", fallback(report.Execution.PolicySnapshot.TaskClassification, "unknown")),
+			fmt.Sprintf("Task risk level: %s", fallback(report.Execution.PolicySnapshot.TaskRiskLevel, "unknown")),
+		}
+		policyLines = append(policyLines, prefixAll(report.Execution.PolicySnapshot.AllowedActions, "Policy allowed action: ")...)
+		policyLines = append(policyLines, prefixAll(report.Execution.PolicySnapshot.ReasonCodes, "Reason code: ")...)
+		policyLines = append(policyLines, prefixAll(report.Execution.PolicySnapshot.SensitiveScope, "Sensitive scope: ")...)
+		policyLines = append(policyLines, prefixAll(report.Execution.PolicySnapshot.SensitivePaths, "Sensitive path: ")...)
+		policyLines = append(policyLines, prefixAll(report.Execution.PolicySnapshot.ForbiddenActions, "Forbidden action: ")...)
+		writeList(&builder, policyLines, "- No policy snapshot was recorded.")
 
 		builder.WriteString("\n## Partial Execution\n\n")
 		partialLines := []string{
@@ -159,6 +222,21 @@ func render(report Report) string {
 
 		builder.WriteString("\n## Confidence Signals\n\n")
 		writeList(&builder, report.Execution.Confidence.Signals, "- No confidence signals were recorded.")
+
+		builder.WriteString("\n## Safety Checks\n\n")
+		if len(report.Execution.SafetyChecks) == 0 {
+			builder.WriteString("- No worker safety checks were recorded.\n")
+		} else {
+			for _, check := range report.Execution.SafetyChecks {
+				line := fmt.Sprintf("%s: %s", fallback(check.Name, "check"), fallback(check.Status, "unknown"))
+				if strings.TrimSpace(check.Detail) != "" {
+					line += " - " + check.Detail
+				}
+				builder.WriteString("- ")
+				builder.WriteString(line)
+				builder.WriteString("\n")
+			}
+		}
 
 		builder.WriteString("\n## Detected Anomalies\n\n")
 		writeList(&builder, report.Execution.DetectedAnomalies, "- No anomalies were detected.")
@@ -222,6 +300,21 @@ func render(report Report) string {
 		builder.WriteString("\n## Structured JSON Result\n\n```json\n")
 		builder.WriteString(renderJSON(report.Execution))
 		builder.WriteString("\n```\n")
+
+		builder.WriteString("\n## Telemetry\n\n")
+		if len(report.Execution.Telemetry) == 0 {
+			builder.WriteString("- No telemetry entries were recorded.\n")
+		} else {
+			for _, entry := range report.Execution.Telemetry {
+				builder.WriteString("- ")
+				builder.WriteString(fallback(entry.Stage, "stage"))
+				builder.WriteString(": ")
+				builder.WriteString(fallback(entry.Status, "unknown"))
+				builder.WriteString(" @ ")
+				builder.WriteString(entry.Timestamp.UTC().Format(time.RFC3339))
+				builder.WriteString("\n")
+			}
+		}
 	}
 	builder.WriteString("\n## Files Changed\n\n")
 	writeList(&builder, report.FilesChanged, "- No tracked file changes were detected.")
@@ -302,6 +395,18 @@ func writeList(builder *strings.Builder, values []string, fallback string) {
 		builder.WriteString(fallback)
 		builder.WriteString("\n")
 	}
+}
+
+func prefixAll(values []string, prefix string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		out = append(out, prefix+value)
+	}
+	return out
 }
 
 func sanitize(value string) string {

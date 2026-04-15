@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -153,21 +152,51 @@ func (s *Service) dispatch(ctx context.Context, sem chan struct{}, wg *sync.Wait
 
 func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, claimed *store.ClaimedTask) error {
 	spec := BuildExecutionSpec(s.cfg, issue, claimed)
+	telemetry := make([]execresult.TelemetryEntry, 0, 12)
+	safetyChecks := make([]execresult.SafetyCheck, 0, 12)
+
+	s.emitTelemetry(ctx, claimed, spec, &telemetry, "start", "started", map[string]any{
+		"jira_issue_key":    spec.JiraIssueKey,
+		"execution_index":   spec.ExecutionIndex,
+		"retry_count":       spec.RetryCount,
+		"execution_mode":    spec.Contract.ExecutionMode,
+		"policy_version":    firstNonEmpty(spec.PolicySnapshot.Version, spec.Contract.PolicyVersion),
+		"approved":          spec.Contract.Approval.Approved,
+		"approval_required": spec.Contract.Approval.Required || spec.PolicySnapshot.ApprovalRequired,
+	})
 
 	results := []string{
 		fmt.Sprintf("Claimed task %s for Jira issue %s.", claimed.Task.ID, issue.Key),
 	}
 	findings := make([]string, 0, 10)
 	decisions := []string{
-		"Worker: " + s.cfg.WorkerName,
+		"Worker: " + spec.WorkerID,
 		"Repository source: " + spec.RepoSource,
 		"Base branch: " + spec.BaseBranch,
 		"Execution branch: " + spec.BranchName,
 		fmt.Sprintf("Execution index: %d", spec.ExecutionIndex),
 		fmt.Sprintf("Retry count: %d", spec.RetryCount),
+		"Execution contract: " + firstNonEmpty(spec.Contract.ID, "missing"),
+		"Execution mode: " + firstNonEmpty(string(spec.Contract.ExecutionMode), "unspecified"),
 	}
 	commands := make([]cli.Result, 0, 20)
 
+	if strings.TrimSpace(spec.Contract.PolicyVersion) != "" {
+		decisions = append(decisions, "Execution contract policy version: "+spec.Contract.PolicyVersion)
+	}
+	if strings.TrimSpace(spec.PolicySnapshot.Version) != "" {
+		decisions = append(decisions, "Policy snapshot version: "+spec.PolicySnapshot.Version)
+	}
+	if spec.Contract.Approval.Required || spec.PolicySnapshot.ApprovalRequired {
+		decisions = append(decisions, fmt.Sprintf("Approval required: %t", true))
+		decisions = append(decisions, fmt.Sprintf("Approval granted: %t", spec.Contract.Approval.Approved))
+	}
+	if strings.TrimSpace(spec.Contract.AutonomyReasoningRef) != "" {
+		decisions = append(decisions, "Autonomy reasoning reference: "+spec.Contract.AutonomyReasoningRef)
+	}
+	if len(spec.Contract.Write.AllowedPaths) > 0 {
+		decisions = append(decisions, "Allowed write paths: "+strings.Join(spec.Contract.Write.AllowedPaths, ", "))
+	}
 	if strings.TrimSpace(spec.FailurePatternHint) != "" {
 		decisions = append(decisions, "Previous failure pattern hint: "+spec.FailurePatternHint)
 	}
@@ -178,8 +207,50 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 
 	_ = s.tryTransition(ctx, issue.Key, s.cfg.JiraInProgressStatus, &findings)
 
-	if len(spec.LintCommands) == 0 && len(spec.TestCommands) == 0 {
-		errMessage := "No lint/test commands were configured for this task."
+	contractDecision := validateExecutionContract(spec, s.cfg.MaxAttempts)
+	safetyChecks = append(safetyChecks, contractDecision.SafetyChecks...)
+	if contractDecision.FailureClassification != execresult.FailureClassificationNone {
+		results = append(results, "Execution stopped during policy validation.")
+		findings = append(findings, contractDecision.FailureReason)
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "policy_validation", "rejected", map[string]any{
+			"classification": contractDecision.FailureClassification,
+			"reason":         contractDecision.FailureReason,
+		})
+		return s.finalizeTerminal(
+			ctx,
+			issue,
+			claimed,
+			spec,
+			claimed.RunID,
+			commands,
+			results,
+			findings,
+			decisions,
+			nil,
+			nil,
+			execresult.StatusFailed,
+			contractDecision.FailureClassification,
+			contractDecision.FailureReason,
+			execresult.ValidationSummary{},
+			nil,
+			nil,
+			"",
+			false,
+			safetyChecks,
+			telemetry,
+		)
+	}
+	s.emitTelemetry(ctx, claimed, spec, &telemetry, "policy_validation", "passed", map[string]any{
+		"execution_mode":         contractDecision.Plan.Mode,
+		"run_codex":              contractDecision.Plan.RunCodex,
+		"run_validation":         contractDecision.Plan.RunValidation,
+		"write_enabled":          contractDecision.Plan.WriteEnabled,
+		"effective_max_attempts": contractDecision.Plan.EffectiveMaxAttempts,
+	})
+	results = append(results, "Execution contract validated successfully.")
+
+	if contractDecision.Plan.RunValidation && len(spec.LintCommands) == 0 && len(spec.TestCommands) == 0 {
+		errMessage := "No lint/test commands were configured for an execute_with_validation task."
 		findings = append(findings, errMessage)
 		return s.finalizeTerminal(
 			ctx,
@@ -201,6 +272,8 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 			nil,
 			"",
 			false,
+			safetyChecks,
+			telemetry,
 		)
 	}
 
@@ -219,6 +292,9 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	if err != nil {
 		errMessage := "Workspace preparation failed: " + err.Error()
 		findings = append(findings, errMessage)
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "workspace", "failed", map[string]any{
+			"reason": errMessage,
+		})
 		return s.finalizeTerminal(
 			ctx,
 			issue,
@@ -239,18 +315,53 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 			nil,
 			"",
 			false,
+			safetyChecks,
+			telemetry,
 		)
 	}
+	s.emitTelemetry(ctx, claimed, spec, &telemetry, "workspace", "prepared", map[string]any{
+		"workspace_path":  ws.Path,
+		"branch_strategy": ws.BranchStrategy,
+	})
 
 	decisions = append(decisions, "Workspace path: "+ws.Path)
 	decisions = append(decisions, "Workspace branch strategy: "+ws.BranchStrategy)
 	results = append(results, "Workspace prepared successfully.")
 
-	execDir := ws.Path
-	if strings.TrimSpace(spec.WorkingDirectory) != "" && spec.WorkingDirectory != "." {
-		execDir = filepath.Join(ws.Path, spec.WorkingDirectory)
-		decisions = append(decisions, "Codex/test working directory: "+execDir)
+	execDir, err := workspace.ResolveWithinRoot(ws.Path, spec.WorkingDirectory)
+	if err != nil {
+		errMessage := "Working directory validation failed: " + err.Error()
+		findings = append(findings, errMessage)
+		safetyChecks = append(safetyChecks, failedCheck("working_directory_within_workspace", errMessage))
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "workspace", "invalid_working_directory", map[string]any{
+			"reason": errMessage,
+		})
+		return s.finalizeTerminal(
+			ctx,
+			issue,
+			claimed,
+			spec,
+			claimed.RunID,
+			commands,
+			results,
+			findings,
+			decisions,
+			nil,
+			nil,
+			execresult.StatusFailed,
+			execresult.FailureClassificationPolicyRejected,
+			errMessage,
+			execresult.ValidationSummary{},
+			nil,
+			nil,
+			ws.BranchStrategy,
+			false,
+			safetyChecks,
+			telemetry,
+		)
 	}
+	safetyChecks = append(safetyChecks, passedCheck("working_directory_within_workspace", "Working directory resolved inside the prepared workspace."))
+	decisions = append(decisions, "Codex/test working directory: "+execDir)
 
 	currentRunID := claimed.RunID
 	currentAttempt := claimed.AttemptNo
@@ -271,149 +382,187 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 	terminalAnomalies := make([]string, 0, 6)
 	workspaceCleaned := false
 
-	for {
-		spec.RunID = currentRunID
-
-		promptText := prompt.Build(prompt.Input{
-			TaskID:                  spec.TaskID,
-			JiraIssueKey:            spec.JiraIssueKey,
-			Title:                   spec.Title,
-			Goal:                    spec.Goal,
-			ExecutionIndex:          spec.ExecutionIndex,
-			RetryCount:              currentRetryCount,
-			FailurePatternHint:      currentFailurePatternHint,
-			Instructions:            spec.Instructions,
-			WorkingDirectory:        spec.WorkingDirectory,
-			BranchName:              spec.BranchName,
-			AcceptanceCriteria:      spec.AcceptanceCriteria,
-			AllowedPaths:            spec.AllowedPaths,
-			AdditionalInstructions:  spec.AdditionalInstructions,
-			PreviousAttemptFindings: retryContext,
+	if !contractDecision.Plan.RunCodex {
+		if contractDecision.Plan.InspectOnly {
+			results = append(results, "inspect_only mode skipped Codex execution and validation.")
+		} else if contractDecision.Plan.DryRun {
+			results = append(results, "dry-run mode validated policy and workspace setup without running Codex or validation commands.")
+		} else {
+			results = append(results, "Execution mode completed without a Codex run.")
+		}
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "codex", "skipped", map[string]any{
+			"execution_mode": contractDecision.Plan.Mode,
+			"dry_run":        contractDecision.Plan.DryRun,
 		})
-
-		codexResult, promptFile, runErr := s.codex.Run(ctx, runner.CodexRequest{
-			WorkspacePath:      execDir,
-			MetadataPath:       ws.MetadataPath,
-			TaskID:             spec.TaskID,
-			BranchName:         spec.BranchName,
-			Goal:               spec.Goal,
-			Prompt:             promptText,
-			AttemptNo:          currentAttempt,
-			RetryCount:         currentRetryCount,
-			ExecutionIndex:     spec.ExecutionIndex,
-			FailurePatternHint: currentFailurePatternHint,
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "validation", "skipped", map[string]any{
+			"execution_mode": contractDecision.Plan.Mode,
+			"dry_run":        contractDecision.Plan.DryRun,
 		})
-		lastPromptFile = promptFile
-		if promptFile != "" {
-			decisions = append(decisions, fmt.Sprintf("Attempt %d prompt file: %s", currentAttempt, promptFile))
+	} else {
+		for {
+			spec.RunID = currentRunID
+
+			promptText := prompt.Build(prompt.Input{
+				TaskID:                  spec.TaskID,
+				JiraIssueKey:            spec.JiraIssueKey,
+				Title:                   spec.Title,
+				Goal:                    spec.Goal,
+				ExecutionIndex:          spec.ExecutionIndex,
+				RetryCount:              currentRetryCount,
+				FailurePatternHint:      currentFailurePatternHint,
+				Instructions:            spec.Instructions,
+				WorkingDirectory:        spec.WorkingDirectory,
+				BranchName:              spec.BranchName,
+				AcceptanceCriteria:      spec.AcceptanceCriteria,
+				AllowedPaths:            spec.AllowedPaths,
+				AdditionalInstructions:  spec.AdditionalInstructions,
+				PreviousAttemptFindings: retryContext,
+				ExecutionMode:           string(spec.Contract.ExecutionMode),
+				ContractActions:         spec.Contract.AllowedActions,
+				AutonomyReasoningRef:    spec.Contract.AutonomyReasoningRef,
+			})
+
+			codexResult, promptFile, runErr := s.codex.Run(ctx, runner.CodexRequest{
+				WorkspacePath:      execDir,
+				MetadataPath:       ws.MetadataPath,
+				TaskID:             spec.TaskID,
+				BranchName:         spec.BranchName,
+				Goal:               spec.Goal,
+				Prompt:             promptText,
+				AttemptNo:          currentAttempt,
+				RetryCount:         currentRetryCount,
+				ExecutionIndex:     spec.ExecutionIndex,
+				FailurePatternHint: currentFailurePatternHint,
+			})
+			lastPromptFile = promptFile
+			if promptFile != "" {
+				decisions = append(decisions, fmt.Sprintf("Attempt %d prompt file: %s", currentAttempt, promptFile))
+			}
+			if strings.TrimSpace(codexResult.CommandLine) != "" {
+				commands = append(commands, codexResult)
+			}
+			s.emitTelemetry(ctx, claimed, spec, &telemetry, "codex", telemetryStatus(runErr == nil && codexResult.Success()), map[string]any{
+				"attempt_no": currentAttempt,
+				"exit_code":  codexResult.ExitCode,
+				"timed_out":  codexResult.TimedOut,
+				"error":      summarizeExecutionError(runErr, codexResult),
+			})
+
+			var qualityResults []cli.Result
+			if contractDecision.Plan.RunValidation {
+				qualityResults = s.quality.RunAll(ctx, execDir, spec.LintCommands, spec.TestCommands)
+				commands = append(commands, qualityResults...)
+				s.emitTelemetry(ctx, claimed, spec, &telemetry, "validation", telemetryStatus(allCommandsSucceeded(qualityResults)), map[string]any{
+					"attempt_no": currentAttempt,
+					"total":      len(qualityResults),
+					"failed":     countFailedCommands(qualityResults),
+				})
+			}
+
+			outcome := summarizeAttemptOutcome(currentAttempt, currentRetryCount, contractDecision.Plan.EffectiveMaxAttempts, codexResult, runErr, qualityResults, failureFingerprints)
+			attempts = append(attempts, outcome)
+			terminalStatus = outcome.Status
+			terminalValidation = outcome.Validation
+			terminalFailureReason = outcome.FailureReason
+			terminalFailureClassification = outcome.FailureClassification
+			terminalAnomalies = dedupe(append(terminalAnomalies, outcome.Anomalies...))
+
+			if outcome.FailureFingerprint != "" {
+				failureFingerprints[outcome.FailureFingerprint]++
+				currentFailurePatternHint = outcome.FailureFingerprint
+			}
+
+			if outcome.FailureReason == "" {
+				results = append(results, fmt.Sprintf("Attempt %d succeeded.", currentAttempt))
+				break
+			}
+
+			findings = append(findings, outcome.FailureReason)
+			findings = append(findings, outcome.RootCauseHints...)
+			findings = append(findings, outcome.Anomalies...)
+			results = append(results, outcome.Summary)
+			retryContext = append(retryContext, outcome.FailureReason)
+
+			if outcome.RepeatedFailurePattern {
+				decisions = append(decisions, fmt.Sprintf("Stopped automatic retries after attempt %d because the failure pattern repeated.", currentAttempt))
+			}
+
+			if !outcome.RetryEligible {
+				break
+			}
+
+			spec.RunID = currentRunID
+			intermediateResult := buildTerminalExecutionResult(
+				spec,
+				outcome.Status,
+				outcome.FailureClassification,
+				outcome.FailureReason,
+				outcome.Validation,
+				attempts,
+				outcome.Anomalies,
+				nil,
+				lastPromptFile,
+				contractDecision.Plan.EffectiveMaxAttempts,
+				ws.BranchStrategy,
+				false,
+				safetyChecks,
+				telemetry,
+			)
+			intermediateResult.Evaluation = execresult.EvaluationHandoff{
+				Ready:               false,
+				State:               "retry_scheduled",
+				FinalOutcomeDecided: false,
+			}
+			intermediateResult.Metadata.RetryCount = currentRetryCount
+			intermediateResult.Metadata.FailurePatternHint = firstNonEmpty(currentFailurePatternHint, intermediateResult.Metadata.FailurePatternHint)
+			intermediateResult.Retry.Eligible = true
+			intermediateResult.Retry.Remaining = max(0, contractDecision.Plan.EffectiveMaxAttempts-currentAttempt)
+			intermediateResult.Retry.MaxAttempts = contractDecision.Plan.EffectiveMaxAttempts
+			confidenceScore := intermediateResult.Confidence.Score
+
+			if err := s.store.FinalizeRun(ctx, store.FinalizeRunInput{
+				PlanID:          claimed.Task.PlanID,
+				TaskID:          claimed.Task.ID,
+				SessionID:       claimed.SessionID,
+				RunID:           currentRunID,
+				RunStatus:       string(outcome.Status),
+				FailureType:     string(intermediateResult.FailureType),
+				RetryCount:      intermediateResult.Metadata.RetryCount,
+				ConfidenceScore: &confidenceScore,
+				OutputPayload:   buildIntermediateRunPayload(intermediateResult, spec.JiraIssueKey),
+				ErrorMessage:    outcome.FailureReason,
+				EventType:       "execution_run_retryable_failure",
+				EventPayload: map[string]any{
+					"attempt_no":       currentAttempt,
+					"execution_result": intermediateResult,
+				},
+			}); err != nil {
+				return fmt.Errorf("record failed attempt %d: %w", currentAttempt, err)
+			}
+
+			nextRetryCount := currentRetryCount + 1
+			retryRun, err := s.store.StartRetryRun(
+				ctx,
+				claimed.Task.PlanID,
+				claimed.Task.ID,
+				claimed.SessionID,
+				claimed.WorkerName,
+				nextRetryCount,
+				buildRetryInputPayload(claimed.Task.InputPayload, nextRetryCount, spec.ExecutionIndex, currentFailurePatternHint),
+			)
+			if err != nil {
+				findings = append(findings, "Retry allocation failed: "+err.Error())
+				terminalFailureReason = strings.TrimSpace(terminalFailureReason + "; retry allocation failed: " + err.Error())
+				terminalStatus = execresult.StatusFailed
+				break
+			}
+
+			currentRunID = retryRun.RunID
+			currentAttempt = retryRun.AttemptNo
+			currentRetryCount = retryRun.RetryCount
+			spec.RunID = currentRunID
+			results = append(results, fmt.Sprintf("Retry attempt %d started.", currentAttempt))
 		}
-		if strings.TrimSpace(codexResult.CommandLine) != "" {
-			commands = append(commands, codexResult)
-		}
-
-		qualityResults := s.quality.RunAll(ctx, execDir, spec.LintCommands, spec.TestCommands)
-		commands = append(commands, qualityResults...)
-
-		outcome := summarizeAttemptOutcome(currentAttempt, currentRetryCount, s.cfg.MaxAttempts, codexResult, runErr, qualityResults, failureFingerprints)
-		attempts = append(attempts, outcome)
-		terminalStatus = outcome.Status
-		terminalValidation = outcome.Validation
-		terminalFailureReason = outcome.FailureReason
-		terminalFailureClassification = outcome.FailureClassification
-		terminalAnomalies = dedupe(append(terminalAnomalies, outcome.Anomalies...))
-
-		if outcome.FailureFingerprint != "" {
-			failureFingerprints[outcome.FailureFingerprint]++
-			currentFailurePatternHint = outcome.FailureFingerprint
-		}
-
-		if outcome.FailureReason == "" {
-			results = append(results, fmt.Sprintf("Attempt %d succeeded.", currentAttempt))
-			break
-		}
-
-		findings = append(findings, outcome.FailureReason)
-		findings = append(findings, outcome.RootCauseHints...)
-		findings = append(findings, outcome.Anomalies...)
-		results = append(results, outcome.Summary)
-		retryContext = append(retryContext, outcome.FailureReason)
-
-		if outcome.RepeatedFailurePattern {
-			decisions = append(decisions, fmt.Sprintf("Stopped automatic retries after attempt %d because the failure pattern repeated.", currentAttempt))
-		}
-
-		if !outcome.RetryEligible {
-			break
-		}
-
-		spec.RunID = currentRunID
-		intermediateResult := buildTerminalExecutionResult(
-			spec,
-			outcome.Status,
-			outcome.FailureClassification,
-			outcome.FailureReason,
-			outcome.Validation,
-			attempts,
-			outcome.Anomalies,
-			nil,
-			lastPromptFile,
-			s.cfg.MaxAttempts,
-			ws.BranchStrategy,
-			false,
-		)
-		intermediateResult.Evaluation = execresult.EvaluationHandoff{
-			Ready:               false,
-			State:               "retry_scheduled",
-			FinalOutcomeDecided: false,
-		}
-		intermediateResult.Metadata.RetryCount = currentRetryCount
-		intermediateResult.Metadata.FailurePatternHint = firstNonEmpty(currentFailurePatternHint, intermediateResult.Metadata.FailurePatternHint)
-		intermediateResult.Retry.Eligible = true
-		intermediateResult.Retry.Remaining = max(0, s.cfg.MaxAttempts-currentAttempt)
-		intermediateResult.Retry.MaxAttempts = s.cfg.MaxAttempts
-		confidenceScore := intermediateResult.Confidence.Score
-
-		if err := s.store.FinalizeRun(ctx, store.FinalizeRunInput{
-			PlanID:          claimed.Task.PlanID,
-			TaskID:          claimed.Task.ID,
-			SessionID:       claimed.SessionID,
-			RunID:           currentRunID,
-			RunStatus:       string(outcome.Status),
-			FailureType:     string(intermediateResult.FailureType),
-			RetryCount:      intermediateResult.Metadata.RetryCount,
-			ConfidenceScore: &confidenceScore,
-			OutputPayload:   buildIntermediateRunPayload(intermediateResult, spec.JiraIssueKey),
-			ErrorMessage:    outcome.FailureReason,
-			EventType:       "execution_run_retryable_failure",
-			EventPayload: map[string]any{
-				"attempt_no":       currentAttempt,
-				"execution_result": intermediateResult,
-			},
-		}); err != nil {
-			return fmt.Errorf("record failed attempt %d: %w", currentAttempt, err)
-		}
-
-		nextRetryCount := currentRetryCount + 1
-		retryRun, err := s.store.StartRetryRun(
-			ctx,
-			claimed.Task.PlanID,
-			claimed.Task.ID,
-			claimed.SessionID,
-			claimed.WorkerName,
-			nextRetryCount,
-			buildRetryInputPayload(claimed.Task.InputPayload, nextRetryCount, spec.ExecutionIndex, currentFailurePatternHint),
-		)
-		if err != nil {
-			findings = append(findings, "Retry allocation failed: "+err.Error())
-			terminalFailureReason = strings.TrimSpace(terminalFailureReason + "; retry allocation failed: " + err.Error())
-			terminalStatus = execresult.StatusFailed
-			break
-		}
-
-		currentRunID = retryRun.RunID
-		currentAttempt = retryRun.AttemptNo
-		currentRetryCount = retryRun.RetryCount
-		results = append(results, fmt.Sprintf("Retry attempt %d started.", currentAttempt))
 	}
 
 	changedFilesResultFiles, changedFilesResult := s.workspace.ChangedFiles(ctx, ws.Path)
@@ -430,6 +579,19 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 
 	if terminalStatus == execresult.StatusSucceeded && len(changedFiles) == 0 {
 		terminalAnomalies = append(terminalAnomalies, "no_tracked_file_changes")
+	}
+
+	fileChecks, fileFailureClassification, fileFailureReason := validateChangedFiles(contractDecision.Plan, spec, changedFiles)
+	safetyChecks = append(safetyChecks, fileChecks...)
+	if fileFailureClassification != execresult.FailureClassificationNone {
+		terminalStatus = execresult.StatusFailed
+		terminalFailureClassification = fileFailureClassification
+		terminalFailureReason = fileFailureReason
+		findings = append(findings, fileFailureReason)
+		s.emitTelemetry(ctx, claimed, spec, &telemetry, "workspace", "changed_files_rejected", map[string]any{
+			"classification": fileFailureClassification,
+			"reason":         fileFailureReason,
+		})
 	}
 
 	cleanupResult, cleanupErr := s.workspace.Cleanup(ctx, ws)
@@ -479,6 +641,8 @@ func (s *Service) executeClaimedTask(ctx context.Context, issue jira.Issue, clai
 		terminalAnomalies,
 		ws.BranchStrategy,
 		workspaceCleaned,
+		safetyChecks,
+		telemetry,
 	)
 }
 
@@ -502,11 +666,15 @@ func (s *Service) finalizeTerminal(
 	anomalies []string,
 	branchStrategy string,
 	workspaceCleaned bool,
+	safetyChecks []execresult.SafetyCheck,
+	telemetry []execresult.TelemetryEntry,
 ) error {
+	spec.RunID = runID
 	promptPath := ""
 	if promptFile != nil {
 		promptPath = strings.TrimSpace(*promptFile)
 	}
+	effectiveMaxAttempts := buildExecutionPlan(spec.Contract.ExecutionMode, spec.Contract.Retry, s.cfg.MaxAttempts, spec.Contract.Write.DryRun, spec.Contract.Write.ReadOnly).EffectiveMaxAttempts
 
 	preArtifactResult := buildTerminalExecutionResult(
 		spec,
@@ -518,9 +686,11 @@ func (s *Service) finalizeTerminal(
 		anomalies,
 		changedFiles,
 		promptPath,
-		s.cfg.MaxAttempts,
+		effectiveMaxAttempts,
 		branchStrategy,
 		workspaceCleaned,
+		safetyChecks,
+		telemetry,
 	)
 
 	if err := s.tryComment(ctx, issue.Key, buildJiraComment(preArtifactResult)); err != nil {
@@ -542,12 +712,15 @@ func (s *Service) finalizeTerminal(
 		anomalies,
 		changedFiles,
 		promptPath,
-		s.cfg.MaxAttempts,
+		effectiveMaxAttempts,
 		branchStrategy,
 		workspaceCleaned,
+		safetyChecks,
+		telemetry,
 	)
 	results = append(results, finalResult.Summary)
 
+	artifactPath := ""
 	artifactRecord, err := s.writeArtifact(ctx, issue, spec, commands, results, findings, decisions, changedFiles, finalResult)
 	if err != nil {
 		s.logger.Error("failed to write artifact", "task_id", claimed.Task.ID, "error", err)
@@ -566,12 +739,42 @@ func (s *Service) finalizeTerminal(
 			anomalies,
 			changedFiles,
 			promptPath,
-			s.cfg.MaxAttempts,
+			effectiveMaxAttempts,
 			branchStrategy,
 			workspaceCleaned,
+			safetyChecks,
+			telemetry,
 		)
 	} else {
-		finalResult.ArtifactPath = artifactRecord.RelativePath
+		artifactPath = artifactRecord.RelativePath
+		finalResult.ArtifactPath = artifactPath
+	}
+
+	finalTelemetry := append([]execresult.TelemetryEntry(nil), telemetry...)
+	s.emitTelemetry(ctx, claimed, spec, &finalTelemetry, "stop", telemetryStatus(!failureStatus(finalResult.Status)), map[string]any{
+		"final_status":           finalResult.Status,
+		"failure_classification": finalResult.FailureClassification,
+		"failure_reason":         finalResult.FailureReason,
+		"workspace_cleaned":      workspaceCleaned,
+	})
+	finalResult = buildTerminalExecutionResult(
+		spec,
+		finalResult.Status,
+		finalResult.FailureClassification,
+		finalResult.FailureReason,
+		finalResult.Validation,
+		attempts,
+		anomalies,
+		changedFiles,
+		promptPath,
+		effectiveMaxAttempts,
+		branchStrategy,
+		workspaceCleaned,
+		safetyChecks,
+		finalTelemetry,
+	)
+	if artifactPath != "" {
+		finalResult.ArtifactPath = artifactPath
 	}
 
 	errorMessage := ""
@@ -670,10 +873,15 @@ func buildJiraComment(result execresult.ExecutionResult) string {
 		"Execution update",
 		fmt.Sprintf("Summary: %s", result.Summary),
 		fmt.Sprintf("Status: %s", result.Status),
+		fmt.Sprintf("Execution mode: %s", result.Metadata.ExecutionMode),
+		fmt.Sprintf("Contract ID: %s", result.Metadata.ContractID),
 		fmt.Sprintf("Execution index: %d", result.Metadata.ExecutionIndex),
 		fmt.Sprintf("Retry count: %d", result.Metadata.RetryCount),
 		fmt.Sprintf("Confidence: %s (%.2f)", result.Confidence.Level, result.Confidence.Score),
 		fmt.Sprintf("Validation: %d/%d commands passed, %d/%d tests passed", result.Validation.Passed, result.Validation.Total, result.Validation.TestPassed, result.Validation.TestTotal),
+	}
+	if result.Contract.Approval.Required {
+		lines = append(lines, fmt.Sprintf("Approval granted: %t", result.Contract.Approval.Approved))
 	}
 
 	if len(result.FilesChanged) > 0 {
