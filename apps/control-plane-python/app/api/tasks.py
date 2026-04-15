@@ -5,6 +5,9 @@ import uuid
 
 from ..models import Event, ExecutionRun, Task, TaskDependency, TaskLoopHistory, TaskSession
 from ..schemas import (
+    AutonomyEvaluationRequest,
+    AutonomyOverrideCreate,
+    AutonomyOverrideRead,
     BatchTaskApprove,
     DispatchEvaluationRead,
     ExecutionRunRead,
@@ -23,6 +26,12 @@ from ..schemas import (
     TaskRelationshipRead,
     TaskRead,
     TaskSessionRead,
+    TaskAutonomyRead,
+)
+from ..services.autonomy_service import (
+    apply_task_autonomy_override,
+    evaluate_task_autonomy,
+    get_task_autonomy,
 )
 from ..database import get_session
 from ..services.bug_triage_agent import triage_run_failure
@@ -184,6 +193,7 @@ def retry_task(
         bug_triage = triage_run_failure(run_context, result_evaluation)
         failure_patterns = detect_failure_patterns(session, task_context, result_evaluation, bug_triage)
         loop_policy = evaluate_loop_policy(
+            session,
             task_context,
             loop_state=loop_state,
             result_evaluation=result_evaluation,
@@ -251,6 +261,44 @@ def retry_task(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/autonomy/evaluate", response_model=TaskAutonomyRead)
+def evaluate_autonomy(
+    task_id: uuid.UUID,
+    request: AutonomyEvaluationRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    try:
+        return evaluate_task_autonomy(
+            session,
+            task_id,
+            request or AutonomyEvaluationRequest(),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{task_id}/autonomy", response_model=TaskAutonomyRead)
+def get_autonomy(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    try:
+        return get_task_autonomy(session, task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/autonomy/override", response_model=AutonomyOverrideRead)
+def override_autonomy(
+    task_id: uuid.UUID,
+    override_in: AutonomyOverrideCreate,
+    session: Session = Depends(get_session),
+):
+    try:
+        return apply_task_autonomy_override(session, task_id, override_in)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{task_id}/follow-up", response_model=FollowUpTaskRead)

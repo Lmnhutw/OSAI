@@ -4,8 +4,16 @@ from typing import List
 import uuid
 
 from ..models import Project, ProjectRequirement, Plan
-from ..schemas import ProjectCreate, ProjectRead, ProjectRequirementCreate, ProjectRequirementRead, PlanRead
+from ..schemas import (
+    PlanRead,
+    ProjectAutonomySummaryRead,
+    ProjectCreate,
+    ProjectRead,
+    ProjectRequirementCreate,
+    ProjectRequirementRead,
+)
 from ..database import get_session
+from ..services.autonomy_service import get_project_autonomy_summary
 from ..services.planner_agent import generate_plan_for_project
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -79,6 +87,13 @@ def list_project_plans(project_id: uuid.UUID, session: Session = Depends(get_ses
         .order_by(Plan.version.desc())
     ).all()
     return plans
+
+@router.get("/{project_id}/autonomy-summary", response_model=ProjectAutonomySummaryRead)
+def autonomy_summary(project_id: uuid.UUID, session: Session = Depends(get_session)):
+    try:
+        return get_project_autonomy_summary(session, project_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 @router.post("/{project_id}/plan/generate", response_model=PlanRead)
 def generate_plan(

@@ -16,6 +16,7 @@ from .control_plane_support import (
     normalize_whitespace,
     previous_failure_count,
     get_task_context,
+    record_autonomy_decision,
 )
 from .policy_engine import evaluate_dispatch_policy
 
@@ -90,6 +91,7 @@ def evaluate_task_dispatch(session: Session, task_id, *, commit: bool = True) ->
         risk_flags.append("repeated_failure_pattern")
 
     policy_decision = evaluate_dispatch_policy(
+        session,
         task_context,
         risk_flags=risk_flags,
         missing_context=missing_context,
@@ -178,6 +180,13 @@ def evaluate_task_dispatch(session: Session, task_id, *, commit: bool = True) ->
             "status": status,
             "decision": policy_decision.model_dump(mode="json"),
         },
+    )
+    record_autonomy_decision(
+        session,
+        task_context=task_context,
+        stage="dispatch",
+        policy_decision=policy_decision,
+        task_status=status,
     )
     if commit:
         session.commit()

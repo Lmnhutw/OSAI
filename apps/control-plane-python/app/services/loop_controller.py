@@ -14,6 +14,7 @@ from .control_plane_support import (
     get_task_context,
     get_task_loop_history,
     latest_result_event,
+    record_autonomy_decision,
     unique_list,
 )
 from .failure_patterns import detect_failure_patterns
@@ -72,6 +73,7 @@ def advance_execution_loop(
     bug_triage = triage_run_failure(run_context, result_evaluation)
     failure_patterns = detect_failure_patterns(session, task_context, result_evaluation, bug_triage)
     loop_policy = evaluate_loop_policy(
+        session,
         task_context,
         loop_state=loop_state,
         result_evaluation=result_evaluation,
@@ -100,17 +102,34 @@ def advance_execution_loop(
     loop_state.last_transition_at = now
     loop_state.updated_at = now
 
-    next_action = "escalate_to_human"
+    next_action = loop_policy.final_action
     decision_status = "escalated"
-    requires_human = True
+    requires_human = loop_policy.autonomy_mode != "auto_execute"
     follow_up_task_id = None
     chained_task_ids = []
 
     if loop_policy.manual_break_required or loop_policy.escalate or result_evaluation.status == "awaiting_review":
-        task_context.task.status = "escalated"
-        run_context.task_session.status = "escalated"
-        loop_state.status = "escalated"
-        loop_state.current_action = "escalate_to_human"
+        if loop_policy.autonomy_mode == "approval_required":
+            decision_status = "awaiting_approval"
+            task_context.task.status = "awaiting_approval"
+            run_context.task_session.status = "awaiting_approval"
+            loop_state.status = "awaiting_approval"
+        elif loop_policy.autonomy_mode == "review_required":
+            decision_status = "awaiting_review"
+            task_context.task.status = "awaiting_review"
+            run_context.task_session.status = "awaiting_review"
+            loop_state.status = "awaiting_review"
+        elif loop_policy.autonomy_mode == "blocked":
+            decision_status = "blocked"
+            task_context.task.status = "blocked"
+            run_context.task_session.status = "blocked"
+            loop_state.status = "blocked"
+        else:
+            decision_status = "escalated"
+            task_context.task.status = "escalated"
+            run_context.task_session.status = "escalated"
+            loop_state.status = "escalated"
+        loop_state.current_action = next_action
     elif result_evaluation.status == "passed":
         task_context.task.status = "completed"
         task_context.task.updated_at = now
@@ -150,7 +169,7 @@ def advance_execution_loop(
         decision_status = retry_response.status
         requires_human = False
         loop_state.status = retry_response.status
-        loop_state.current_action = "re_execute"
+        loop_state.current_action = "schedule_retry"
     elif bug_triage.recommended_action == "fix_task" or result_evaluation.status in {"needs_rework", "qa_pending"}:
         follow_up_task, _, _, created = create_follow_up_task_from_evaluation(
             session,
@@ -239,6 +258,31 @@ def advance_execution_loop(
         event_source="control_plane.loop_controller",
         event_type="loop.decision_recorded",
         payload=loop_decision.model_dump(mode="json"),
+    )
+    create_event(
+        session,
+        project_id=task_context.project.id,
+        plan_id=task_context.plan.id,
+        task_id=task_context.task.id,
+        task_session_id=result_evaluation.task_session_id,
+        execution_run_id=result_evaluation.run_id,
+        event_source="control_plane.policy_engine",
+        event_type="policy.loop_decision",
+        payload={
+            "task_id": str(task_context.task.id),
+            "run_id": str(result_evaluation.run_id),
+            "status": decision_status,
+            "decision": loop_policy.model_dump(mode="json"),
+        },
+    )
+    record_autonomy_decision(
+        session,
+        task_context=task_context,
+        stage="loop",
+        policy_decision=loop_policy,
+        task_status=decision_status,
+        run_id=result_evaluation.run_id,
+        task_session_id=result_evaluation.task_session_id,
     )
     if follow_up_task_id:
         create_event(

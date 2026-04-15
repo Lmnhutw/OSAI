@@ -10,6 +10,7 @@ from .control_plane_support import (
     is_blocked_error,
     is_failure_status,
     previous_failure_count,
+    record_autonomy_decision,
 )
 from .loop_controller import advance_execution_loop
 from .policy_engine import evaluate_result_policy
@@ -52,6 +53,7 @@ def evaluate_run_result(session: Session, run_id) -> ResultEvaluationRead:
         result_status = "qa_pending"
 
     policy_decision = evaluate_result_policy(
+        session,
         run_context,
         risk_flags=risk_flags,
         result_status=result_status,
@@ -149,6 +151,15 @@ def evaluate_run_result(session: Session, run_id) -> ResultEvaluationRead:
             "status": result_status,
             "decision": policy_decision.model_dump(mode="json"),
         },
+    )
+    record_autonomy_decision(
+        session,
+        task_context=run_context.task_context,
+        stage="result",
+        policy_decision=policy_decision,
+        task_status=result_status,
+        run_id=run_context.execution_run.id,
+        task_session_id=run_context.task_session.id,
     )
     loop_decision = advance_execution_loop(
         session,

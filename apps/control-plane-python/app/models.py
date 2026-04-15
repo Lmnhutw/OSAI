@@ -127,6 +127,24 @@ class Approval(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
+class AutonomyOverride(SQLModel, table=True):
+    __tablename__ = "autonomy_overrides"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    project_id: Optional[uuid.UUID] = Field(default=None, foreign_key="projects.id")
+    task_id: Optional[uuid.UUID] = Field(default=None, foreign_key="tasks.id")
+    scope: str = Field(default="task", sa_type=Text)
+    operator: str = Field(sa_type=Text)
+    reason: Optional[str] = Field(default=None, sa_type=Text)
+    status: str = Field(default="active", sa_type=Text)
+    force_autonomy_mode: Optional[str] = Field(default=None, sa_type=Text)
+    force_review: bool = Field(default=False)
+    disable_retries: bool = Field(default=False)
+    sensitive_modules: List[str] = Field(default_factory=list, sa_column=Column(JSON))
+    policy_adjustments: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+
 class TaskSession(SQLModel, table=True):
     __tablename__ = "task_sessions"
 

@@ -221,6 +221,59 @@ class PolicyDecisionRead(BaseModel):
     risk_threshold: str = "medium"
     reason_codes: List[str] = Field(default_factory=list)
     evidence: Dict[str, Any] = Field(default_factory=dict)
+    autonomy_mode: str = "approval_required"
+    approval_required: bool = False
+    review_required: bool = False
+    escalation_reason: Optional[str] = None
+    allowed_actions: List[str] = Field(default_factory=list)
+    final_action: str = "escalate_to_human"
+    confidence_score: float = 0.0
+    confidence_label: str = "low"
+    confidence_breakdown: Dict[str, float] = Field(default_factory=dict)
+    contributing_factors: Dict[str, Any] = Field(default_factory=dict)
+    task_classification: str = "medium_risk_implementation"
+    task_risk_level: str = "medium"
+    classification_reasons: List[str] = Field(default_factory=list)
+    sensitive_scope: List[str] = Field(default_factory=list)
+    sensitive_paths: List[str] = Field(default_factory=list)
+    override_applied: bool = False
+    override_summary: Optional[str] = None
+
+
+class AutonomyOverrideCreate(BaseModel):
+    operator: str
+    reason: str
+    apply_to_project: bool = False
+    force_autonomy_mode: Optional[str] = None
+    force_review: bool = False
+    disable_retries: bool = False
+    sensitive_modules: List[str] = Field(default_factory=list)
+    policy_adjustments: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AutonomyOverrideRead(BaseModel):
+    id: uuid.UUID
+    project_id: Optional[uuid.UUID] = None
+    task_id: Optional[uuid.UUID] = None
+    scope: str
+    operator: str
+    reason: Optional[str] = None
+    status: str
+    force_autonomy_mode: Optional[str] = None
+    force_review: bool = False
+    disable_retries: bool = False
+    sensitive_modules: List[str] = Field(default_factory=list)
+    policy_adjustments: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AutonomyEvaluationRequest(BaseModel):
+    stage: str = "dispatch"
+    run_id: Optional[uuid.UUID] = None
 
 
 class FailurePatternRead(BaseModel):
@@ -418,3 +471,40 @@ class TaskHistoryRead(BaseModel):
     relationships: List[TaskRelationshipRead] = Field(default_factory=list)
     loop_history: List[TaskLoopHistoryEntryRead] = Field(default_factory=list)
     entries: List[TaskHistoryEventRead] = Field(default_factory=list)
+
+
+class TaskAutonomyRead(BaseModel):
+    task_id: uuid.UUID
+    project_id: uuid.UUID
+    stage: str
+    task_status: str
+    run_id: Optional[uuid.UUID] = None
+    source_event_id: Optional[uuid.UUID] = None
+    evaluated_at: Optional[datetime] = None
+    policy_decision: PolicyDecisionRead
+    active_overrides: List[AutonomyOverrideRead] = Field(default_factory=list)
+
+
+class ProjectAutonomyTaskSummaryRead(BaseModel):
+    task_id: uuid.UUID
+    title: str
+    status: str
+    autonomy_mode: str
+    confidence_score: float = 0.0
+    confidence_label: str = "low"
+    task_classification: str
+    sensitive_scope: List[str] = Field(default_factory=list)
+    final_action: str
+    evaluated_at: Optional[datetime] = None
+
+
+class ProjectAutonomySummaryRead(BaseModel):
+    project_id: uuid.UUID
+    total_tasks: int
+    evaluated_tasks: int
+    unevaluated_tasks: int
+    mode_counts: Dict[str, int] = Field(default_factory=dict)
+    classification_counts: Dict[str, int] = Field(default_factory=dict)
+    sensitive_scope_counts: Dict[str, int] = Field(default_factory=dict)
+    tasks: List[ProjectAutonomyTaskSummaryRead] = Field(default_factory=list)
+    generated_at: datetime

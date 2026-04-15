@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -22,6 +23,7 @@ from ..models import (
     TaskRelationship,
     TaskSession,
 )
+from ..schemas import PolicyDecisionRead
 
 ACCEPTANCE_KEYS = (
     "acceptance_criteria",
@@ -536,3 +538,34 @@ def create_event(
     )
     session.add(event)
     return event
+
+
+def record_autonomy_decision(
+    session: Session,
+    *,
+    task_context: TaskContext,
+    stage: str,
+    policy_decision: PolicyDecisionRead,
+    task_status: str,
+    run_id=None,
+    task_session_id=None,
+) -> Event:
+    return create_event(
+        session,
+        project_id=task_context.project.id,
+        plan_id=task_context.plan.id,
+        task_id=task_context.task.id,
+        task_session_id=task_session_id,
+        execution_run_id=run_id,
+        event_source="control_plane.autonomy_policy_engine",
+        event_type="autonomy.decision_recorded",
+        payload={
+            "task_id": str(task_context.task.id),
+            "project_id": str(task_context.project.id),
+            "stage": stage,
+            "task_status": task_status,
+            "run_id": str(run_id) if run_id else None,
+            "evaluated_at": datetime.now(timezone.utc).isoformat(),
+            "policy_decision": policy_decision.model_dump(mode="json"),
+        },
+    )
