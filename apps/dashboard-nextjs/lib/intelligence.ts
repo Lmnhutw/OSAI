@@ -168,7 +168,18 @@ function entryMatches(entry: MemoryEntry, terms: string[]) {
 
 export interface FlowItem {
   id: string;
-  kind: "task" | "dispatch" | "session" | "run" | "retry" | "review" | "qa";
+  kind:
+    | "task"
+    | "dispatch"
+    | "decision"
+    | "contract"
+    | "policy"
+    | "session"
+    | "run"
+    | "retry"
+    | "review"
+    | "qa"
+    | "escalation";
   label: string;
   description: string;
   status: string;
@@ -413,6 +424,36 @@ export function buildExecutionFlow(
       status: dispatchEvaluation.status,
       time: dispatchEvaluation.evaluated_at
     });
+
+    items.push({
+      id: `${task.id}-contract`,
+      kind: "contract",
+      label: "Execution contract issued",
+      description: dispatchEvaluation.policy_decision.allow_auto_execute
+        ? `Auto execution allowed with retry limit ${dispatchEvaluation.policy_decision.max_retry}.`
+        : "Execution stayed under a constrained or manual contract.",
+      status: dispatchEvaluation.policy_decision.allow_auto_execute
+        ? "ready_for_dispatch"
+        : dispatchEvaluation.policy_decision.block
+          ? "dispatch_blocked"
+          : dispatchEvaluation.policy_decision.require_approval
+            ? "awaiting_approval"
+            : "awaiting_review",
+      time: dispatchEvaluation.evaluated_at
+    });
+
+    if (dispatchEvaluation.policy_decision.block) {
+      items.push({
+        id: `${task.id}-policy`,
+        kind: "policy",
+        label: "Policy rejection",
+        description:
+          dispatchEvaluation.policy_decision.reason_codes[0] ||
+          "Policy blocked execution under the current contract.",
+        status: "dispatch_blocked",
+        time: dispatchEvaluation.evaluated_at
+      });
+    }
   }
 
   const runsBySession = new Map<string, ExecutionRun[]>();
@@ -502,7 +543,46 @@ export function buildExecutionFlow(
     });
   }
 
-  return items;
+  if (resultEvaluation) {
+    items.push({
+      id: `${task.id}-decision`,
+      kind: "decision",
+      label: "Autonomy decision issued",
+      description: resultEvaluation.loop_decision
+        ? `Loop controller chose ${resultEvaluation.loop_decision.next_action.replace(/_/g, " ")}.`
+        : "Result evaluation refreshed the autonomy posture for this task.",
+      status: resultEvaluation.status,
+      time: resultEvaluation.evaluated_at
+    });
+
+    if (resultEvaluation.policy_decision.block) {
+      items.push({
+        id: `${task.id}-result-policy`,
+        kind: "policy",
+        label: "Policy rejection",
+        description:
+          resultEvaluation.policy_decision.reason_codes[0] ||
+          "The result evaluator blocked this execution path.",
+        status: "blocked",
+        time: resultEvaluation.evaluated_at
+      });
+    }
+
+    if (resultEvaluation.loop_decision?.requires_human || resultEvaluation.policy_decision.escalate) {
+      items.push({
+        id: `${task.id}-escalation`,
+        kind: "escalation",
+        label: "Escalated to human",
+        description:
+          resultEvaluation.loop_decision?.reasons[0] ||
+          "The execution path crossed a threshold that requires human intervention.",
+        status: "escalated",
+        time: resultEvaluation.evaluated_at
+      });
+    }
+  }
+
+  return items.sort((left, right) => (left.time || "").localeCompare(right.time || ""));
 }
 
 export function getImportantDecisionEntries(entries: MemoryEntry[]) {

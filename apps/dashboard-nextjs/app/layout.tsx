@@ -6,7 +6,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "OSAI Control Intelligence",
-  description: "Phase 2 dashboard for evaluations, memory, task flow, execution insights, and operator decision support."
+  description: "Phase 4 dashboard for selective autonomy, explainability, execution contracts, and operator decision support."
 };
 
 export default function RootLayout({

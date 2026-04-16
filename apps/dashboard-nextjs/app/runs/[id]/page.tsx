@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { CollapsibleLog } from "@/components/collapsible-log";
+import { ExecutionFlowTimeline } from "@/components/execution-flow-timeline";
 import { ExecutionInsightsPanel } from "@/components/execution-insights-panel";
 import { EventTimeline } from "@/components/event-timeline";
 import { KeyValueGrid } from "@/components/key-value-grid";
@@ -20,6 +21,7 @@ import {
   listSessionEvents
 } from "@/lib/api/control-plane";
 import {
+  buildExecutionFlow,
   getQADecision,
   getResultEvaluation,
   getReviewerDecision
@@ -54,6 +56,18 @@ export default async function RunDetailPage({ params }: RunDetailPageProps) {
   const resultEvaluation = getResultEvaluation(runEvents.data);
   const reviewerDecision = getReviewerDecision(runEvents.data) || resultEvaluation?.reviewer_decision || null;
   const qaDecision = getQADecision(runEvents.data) || resultEvaluation?.qa_decision || null;
+  const flowItems =
+    task.data && run.data
+      ? buildExecutionFlow(
+          task.data,
+          session.data ? [session.data] : [],
+          [run.data],
+          null,
+          resultEvaluation,
+          reviewerDecision,
+          qaDecision
+        )
+      : [];
 
   return (
     <div className="space-y-6">
@@ -148,6 +162,13 @@ export default async function RunDetailPage({ params }: RunDetailPageProps) {
                 qaDecision={qaDecision}
               />
             ) : null}
+          </SectionPanel>
+
+          <SectionPanel
+            title="Autonomy trace"
+            description="Decision, contract, policy, and escalation events inferred around this execution path."
+          >
+            <ExecutionFlowTimeline items={flowItems} />
           </SectionPanel>
 
           <SectionPanel

@@ -5,16 +5,19 @@ import { EmptyState } from "@/components/empty-state";
 import { KeyValueGrid } from "@/components/key-value-grid";
 import { ProjectMemoryPanel } from "@/components/memory-panels";
 import { PageHeader } from "@/components/page-header";
+import { ProjectAutonomySummary } from "@/components/project-autonomy-summary";
 import { ResourceNotice } from "@/components/resource-notice";
 import { RunsTable } from "@/components/runs-table";
 import { SectionPanel } from "@/components/section-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { TasksByStatus } from "@/components/tasks-by-status";
+import { buildProjectAutonomySummary, buildTaskAutonomySnapshot } from "@/lib/autonomy";
 import {
   emptyResource,
   getProject,
   getProjectMemory,
   getTaskMemory,
+  getTaskHistory,
   listPlanRuns,
   listPlanTasks,
   listProjectPlans,
@@ -56,9 +59,30 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
   const taskMemories = activePlan
     ? await Promise.all(tasks.data.map((task) => getTaskMemory(task.id)))
     : [];
+  const taskHistories = activePlan
+    ? await Promise.all(tasks.data.map((task) => getTaskHistory(task.id)))
+    : [];
 
   const curatedTaskMemories = taskMemories.map((resource) => resource.data);
   const curatedTaskCount = curatedTaskMemories.filter((memory) => memory.entries.length > 0).length;
+  const autonomySummary = buildProjectAutonomySummary({
+    projectId: id,
+    projectName: project.data?.name || `Project ${id}`,
+    tasks: tasks.data,
+    snapshots: tasks.data.map((task, index) =>
+      buildTaskAutonomySnapshot(
+        task,
+        taskHistories[index]?.data || {
+          task_id: task.id,
+          loop_state: null,
+          relationships: [],
+          loop_history: [],
+          entries: []
+        },
+        curatedTaskMemories[index] || null
+      )
+    )
+  });
 
   return (
     <div className="space-y-6">
@@ -72,7 +96,9 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
         actions={project.data ? <StatusBadge status={project.data.status} /> : null}
       />
 
-      <ResourceNotice resources={[project, requirements, plans, projectMemory, tasks, runs, ...taskMemories]} />
+      <ResourceNotice
+        resources={[project, requirements, plans, projectMemory, tasks, runs, ...taskMemories, ...taskHistories]}
+      />
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
@@ -258,6 +284,13 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
           </SectionPanel>
         </div>
       </div>
+
+      <SectionPanel
+        title="Autonomy summary"
+        description="Project-level confidence, approval queues, policy blocks, and human escalations for the latest plan."
+      >
+        <ProjectAutonomySummary summary={autonomySummary} />
+      </SectionPanel>
 
       <SectionPanel
         title="Tasks grouped by status"

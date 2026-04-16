@@ -12,7 +12,9 @@ import { RunsTable } from "@/components/runs-table";
 import { SectionPanel } from "@/components/section-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskAutonomyPanel } from "@/components/task-autonomy-panel";
+import { TaskControlTower } from "@/components/task-control-tower";
 import { TaskDispatchPanel } from "@/components/task-dispatch-panel";
+import { buildAutonomyControlTimeline, buildTaskAutonomySnapshot } from "@/lib/autonomy";
 import {
   emptyResource,
   getPlan,
@@ -136,6 +138,11 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
       ]
     : [];
 
+  const autonomySnapshot =
+    task.data ? buildTaskAutonomySnapshot(task.data, taskHistory.data, taskMemory.data) : null;
+  const autonomyTimeline =
+    autonomySnapshot ? buildAutonomyControlTimeline(taskHistory.data, autonomySnapshot) : [];
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -238,6 +245,15 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
           </SectionPanel>
 
           <SectionPanel
+            title="Selective autonomy"
+            description="Operator-first decision context for why this task was auto-cleared, held, or escalated, with temporary override controls."
+          >
+            {autonomySnapshot ? (
+              <TaskControlTower snapshot={autonomySnapshot} timeline={autonomyTimeline} />
+            ) : null}
+          </SectionPanel>
+
+          <SectionPanel
             title="Autonomous execution"
             description="Timeline and graph views for retries, task chains, follow-up creation, and escalation points."
           >
@@ -280,8 +296,11 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
           <SectionPanel
             title="Task memory"
             description="Curated task summary, important decisions, and bug patterns carried forward into future execution."
+            className="scroll-mt-24"
           >
-            <TaskMemoryPanel taskMemory={taskMemory.data} />
+            <div id="task-memory">
+              <TaskMemoryPanel taskMemory={taskMemory.data} />
+            </div>
           </SectionPanel>
 
           <SectionPanel

@@ -8,13 +8,13 @@ import { cn } from "@/lib/format";
 const navItems = [
   {
     href: "/observability",
-    label: "Observability",
-    description: "Risk, review, QA, retries, and failure filters"
+    label: "Autonomy",
+    description: "Confidence, approval queues, policy blocks, and escalations"
   },
   {
     href: "/projects",
     label: "Projects",
-    description: "Registry, plans, memory, tasks, runs, and logs"
+    description: "Registry, plans, memory, tasks, contracts, and logs"
   }
 ];
 
@@ -35,7 +35,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   Control intelligence
                 </h1>
                 <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                  A restrained operator surface for Phase 2 evaluation, memory, execution, and decision support.
+                  A restrained operator surface for Phase 4 selective autonomy, operator trust, and controlled execution.
                 </p>
               </div>
             </div>
@@ -69,9 +69,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 Scope
               </p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                <li>Evaluation and QA visibility</li>
-                <li>Memory, decisions, and bug patterns</li>
-                <li>Execution history and retry loops</li>
+                <li>Selective autonomy decisions and confidence</li>
+                <li>Memory, policy evidence, and operator overrides</li>
+                <li>Execution history, contracts, and escalation loops</li>
               </ul>
             </div>
           </div>
@@ -81,14 +81,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <header className="sticky top-0 z-20 border-b border-[rgba(var(--line),0.92)] bg-[rgba(242,244,239,0.86)] backdrop-blur">
             <div className="flex flex-col gap-2 px-5 py-4 md:px-8">
               <p className="text-xs uppercase tracking-[0.28em] text-[rgb(var(--ink-soft))]">
-                Phase 2 intelligence
+                Phase 4 control surface
               </p>
               <div className="flex flex-col gap-1 md:flex-row md:items-end md:justify-between">
                 <p className="text-lg font-semibold tracking-[-0.03em] text-[rgb(var(--ink-strong))]">
-                  Evaluations, memory, runs, and task flow in one surface
+                  Selective autonomy, contracts, evidence, and execution flow in one surface
                 </p>
                 <p className="text-sm leading-6 text-[rgb(var(--ink-soft))]">
-                  Read from the control plane, surface risk, and trigger evaluation actions when operators need them.
+                  Read from the control plane, surface risk and confidence, and let operators inspect or influence automation safely.
                 </p>
               </div>
             </div>
