@@ -1,0 +1,7 @@
+.git
+node_modules
+apps/dashboard-nextjs/.next
+apps/dashboard-nextjs/tsconfig.tsbuildinfo
+apps/execution-go/artifacts
+**/__pycache__
+*.pyc
