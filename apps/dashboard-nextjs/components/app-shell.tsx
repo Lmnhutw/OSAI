@@ -4,19 +4,62 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { cn } from "@/lib/format";
+import { RecentItems } from "@/components/recent-items";
 
 const navItems = [
   {
-    href: "/observability",
-    label: "Autonomy",
-    description: "Confidence, approval queues, policy blocks, and escalations"
+    href: "/",
+    label: "Overview",
+    description: "Current system posture, model readiness, and operator workload"
+  },
+  {
+    href: "/work-queue",
+    label: "Work queue",
+    description: "Pending plan approvals and tasks that require operator attention"
   },
   {
     href: "/projects",
     label: "Projects",
     description: "Registry, plans, memory, tasks, contracts, and logs"
+  },
+  {
+    href: "/plans",
+    label: "Plans",
+    description: "Versioned AI proposals and approval status"
+  },
+  {
+    href: "/runs",
+    label: "Runs",
+    description: "Execution attempts and evaluation handoffs"
+  },
+  {
+    href: "/memory",
+    label: "Memory",
+    description: "Curated project knowledge and evidence"
+  },
+  {
+    href: "/observability",
+    label: "Policies",
+    description: "Autonomy policy, confidence, overrides, and escalations"
+  },
+  {
+    href: "/system-health",
+    label: "System health",
+    description: "Control-plane readiness and model configuration"
+  },
+  {
+    href: "/ai-runtime",
+    label: "AI runtime",
+    description: "Three model profiles, agent activity, and audit readiness"
   }
 ];
+
+function breadcrumbLabel(segment: string) {
+  if (segment === "ai-runtime") return "AI runtime";
+  if (segment === "work-queue") return "Work queue";
+  if (segment === "system-health") return "System health";
+  return segment.replace(/-/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
@@ -40,7 +83,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </div>
             </div>
 
-            <nav className="space-y-2">
+            <details className="group lg:hidden">
+              <summary className="cursor-pointer rounded-xl border border-[rgb(var(--line))] bg-white/75 px-4 py-3 text-sm font-semibold text-[rgb(var(--ink-strong))] focus-visible:ring-2 focus-visible:ring-[rgb(var(--focus))]">
+                Open navigation
+              </summary>
+              <nav aria-label="Mobile navigation" className="mt-3 space-y-2">
+                {navItems.map((item) => (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className="block rounded-xl px-3 py-2 text-sm text-[rgb(var(--ink-strong))] hover:bg-white/70"
+                  >
+                    {item.label}
+                  </Link>
+                ))}
+              </nav>
+            </details>
+
+            <nav aria-label="Primary navigation" className="hidden space-y-2 lg:block">
               {navItems.map((item) => {
                 const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
 
@@ -64,6 +124,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               })}
             </nav>
 
+            <RecentItems />
+
             <div className="surface-inline rounded-[24px] px-4 py-4">
               <p className="text-xs uppercase tracking-[0.2em] text-[rgb(var(--ink-soft))]">
                 Scope
@@ -79,7 +141,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <div className="min-w-0">
           <header className="sticky top-0 z-20 border-b border-[rgba(var(--line),0.92)] bg-[rgba(242,244,239,0.86)] backdrop-blur">
-            <div className="flex flex-col gap-2 px-5 py-4 md:px-8">
+            <div className="flex flex-col gap-3 px-5 py-4 md:px-8">
+              <nav aria-label="Breadcrumb" className="overflow-x-auto">
+                <ol className="flex min-w-max items-center gap-2 text-xs text-[rgb(var(--ink-soft))]">
+                  <li><Link href="/" className="hover:text-[rgb(var(--ink-strong))]">Overview</Link></li>
+                  {pathname.split("/").filter(Boolean).map((segment, index, segments) => {
+                    const href = `/${segments.slice(0, index + 1).join("/")}`;
+                    const current = index === segments.length - 1;
+                    return (
+                      <li key={`${href}-${segment}`} className="flex items-center gap-2">
+                        <span aria-hidden="true">/</span>
+                        {current ? (
+                          <span aria-current="page">{breadcrumbLabel(segment)}</span>
+                        ) : (
+                          <Link href={href} className="hover:text-[rgb(var(--ink-strong))]">{breadcrumbLabel(segment)}</Link>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </nav>
               <p className="text-xs uppercase tracking-[0.28em] text-[rgb(var(--ink-soft))]">
                 Phase 4 control surface
               </p>
@@ -91,6 +172,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   Read from the control plane, surface risk and confidence, and let operators inspect or influence automation safely.
                 </p>
               </div>
+              <form action="/search" className="flex max-w-xl items-center gap-2">
+                <label htmlFor="global-search" className="sr-only">Search OSAI</label>
+                <input
+                  id="global-search"
+                  name="q"
+                  minLength={2}
+                  placeholder="Search projects, plans, and tasks"
+                  className="w-full rounded-xl border border-[rgb(var(--line))] bg-white/80 px-3 py-2 text-sm text-[rgb(var(--ink-strong))] outline-none transition focus-visible:ring-2 focus-visible:ring-[rgb(var(--focus))]"
+                />
+                <button type="submit" className="rounded-xl bg-[rgb(var(--accent))] px-3 py-2 text-sm font-medium text-white">Search</button>
+              </form>
             </div>
           </header>
 

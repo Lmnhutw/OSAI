@@ -13,6 +13,8 @@ from ..schemas import (
     ProjectRequirementRead,
 )
 from ..database import get_session
+from ..authz import approval_actor
+from ..ai_runtime import ModelRuntimeError
 from ..services.autonomy_service import get_project_autonomy_summary
 from ..services.planner_agent import generate_plan_for_project
 
@@ -98,6 +100,7 @@ def autonomy_summary(project_id: uuid.UUID, session: Session = Depends(get_sessi
 @router.post("/{project_id}/plan/generate", response_model=PlanRead)
 def generate_plan(
     project_id: uuid.UUID,
+    actor: str = Depends(approval_actor),
     session: Session = Depends(get_session)
 ):
     project = session.get(Project, project_id)
@@ -109,6 +112,8 @@ def generate_plan(
     if not reqs:
         raise HTTPException(status_code=400, detail="Cannot generate plan without requirements")
         
-    plan = generate_plan_for_project(session, project)
-    return plan
+    try:
+        return generate_plan_for_project(session, project)
+    except ModelRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 

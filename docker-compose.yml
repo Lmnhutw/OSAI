@@ -9,23 +9,60 @@ services:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./db/schema/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-osai}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  migrations:
+    image: postgres:16-alpine
+    environment:
+      PGHOST: postgres
+      PGPORT: 5432
+      PGDATABASE: ${POSTGRES_DB:-osai}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./db/migrations:/migrations:ro
+    entrypoint: ["/bin/sh", "/migrations/migrate.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   control-plane:
     build:
       context: ./apps/control-plane-python
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-osai}
+      OSAI_ENV: ${OSAI_ENV:-development}
+      OSAI_REASONING_PROVIDER: ${OSAI_REASONING_PROVIDER:-openai_compatible}
+      OSAI_REASONING_MODEL: ${OSAI_REASONING_MODEL:-}
+      OSAI_REASONING_BASE_URL: ${OSAI_REASONING_BASE_URL:-https://api.openai.com/v1}
+      OSAI_REASONING_API_KEY: ${OSAI_REASONING_API_KEY:-}
+      OSAI_EXECUTION_PROVIDER: ${OSAI_EXECUTION_PROVIDER:-openai_compatible}
+      OSAI_EXECUTION_MODEL: ${OSAI_EXECUTION_MODEL:-}
+      OSAI_EXECUTION_BASE_URL: ${OSAI_EXECUTION_BASE_URL:-https://api.openai.com/v1}
+      OSAI_EXECUTION_API_KEY: ${OSAI_EXECUTION_API_KEY:-}
+      OSAI_REVIEW_PROVIDER: ${OSAI_REVIEW_PROVIDER:-openai_compatible}
+      OSAI_REVIEW_MODEL: ${OSAI_REVIEW_MODEL:-}
+      OSAI_REVIEW_BASE_URL: ${OSAI_REVIEW_BASE_URL:-https://api.openai.com/v1}
+      OSAI_REVIEW_API_KEY: ${OSAI_REVIEW_API_KEY:-}
+      OSAI_JIRA_ENABLED: ${OSAI_JIRA_ENABLED:-false}
+      OSAI_JIRA_AUTO_CREATE: ${OSAI_JIRA_AUTO_CREATE:-false}
+      OSAI_JIRA_BASE_URL: ${OSAI_JIRA_BASE_URL:-}
+      OSAI_JIRA_PROJECT_KEY: ${OSAI_JIRA_PROJECT_KEY:-}
+      OSAI_JIRA_EMAIL: ${OSAI_JIRA_EMAIL:-}
+      OSAI_JIRA_API_TOKEN: ${OSAI_JIRA_API_TOKEN:-}
+      OSAI_JIRA_BEARER_TOKEN: ${OSAI_JIRA_BEARER_TOKEN:-}
+      OSAI_JIRA_READY_LABEL: ${OSAI_JIRA_READY_LABEL:-osai-ready}
+      OSAI_JIRA_ISSUE_TYPE: ${OSAI_JIRA_ISSUE_TYPE:-Task}
     ports:
       - "${CONTROL_PLANE_PORT:-8000}:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   dashboard:
@@ -47,18 +84,20 @@ services:
     profiles: ["worker"]
     environment:
       EXECUTION_DB_DSN: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-osai}?sslmode=disable
-      EXECUTION_JIRA_BASE_URL: ${EXECUTION_JIRA_BASE_URL:-}
-      EXECUTION_JIRA_EMAIL: ${EXECUTION_JIRA_EMAIL:-}
-      EXECUTION_JIRA_API_TOKEN: ${EXECUTION_JIRA_API_TOKEN:-}
-      EXECUTION_JIRA_BEARER_TOKEN: ${EXECUTION_JIRA_BEARER_TOKEN:-}
+      EXECUTION_JIRA_BASE_URL: ${OSAI_JIRA_BASE_URL:-}
+      EXECUTION_JIRA_PROJECT_KEY: ${OSAI_JIRA_PROJECT_KEY:-}
+      EXECUTION_JIRA_READY_LABEL: ${OSAI_JIRA_READY_LABEL:-osai-ready}
+      EXECUTION_JIRA_EMAIL: ${OSAI_JIRA_EMAIL:-}
+      EXECUTION_JIRA_API_TOKEN: ${OSAI_JIRA_API_TOKEN:-}
+      EXECUTION_JIRA_BEARER_TOKEN: ${OSAI_JIRA_BEARER_TOKEN:-}
       EXECUTION_REPO_SOURCE: /workspace
       EXECUTION_ARTIFACT_ROOT: /workspace/artifacts/execution-go
       EXECUTION_WORKSPACE_ROOT: /tmp/execution-go-workspaces
     volumes:
       - .:/workspace
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
 
 volumes:
   postgres-data:

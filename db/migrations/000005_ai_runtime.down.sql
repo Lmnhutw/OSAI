@@ -1,0 +1,12 @@
+DROP TRIGGER IF EXISTS trg_agent_runs_set_updated_at ON agent_runs;
+DROP TRIGGER IF EXISTS trg_workflow_runs_set_updated_at ON workflow_runs;
+DROP TRIGGER IF EXISTS trg_agent_definitions_set_updated_at ON agent_definitions;
+DROP TRIGGER IF EXISTS trg_model_configurations_set_updated_at ON model_configurations;
+DROP TRIGGER IF EXISTS trg_model_providers_set_updated_at ON model_providers;
+DROP TABLE IF EXISTS model_calls;
+DROP TABLE IF EXISTS agent_runs;
+DROP TABLE IF EXISTS workflow_runs;
+DROP TABLE IF EXISTS agent_definitions;
+DROP TABLE IF EXISTS prompt_versions;
+DROP TABLE IF EXISTS model_configurations;
+DROP TABLE IF EXISTS model_providers;

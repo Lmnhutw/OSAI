@@ -3,17 +3,24 @@ import "server-only";
 import type {
   ApiResource,
   Approval,
+  ApprovalDecisionInput,
   ApprovalInput,
+  AutonomyOverrideInput,
+  AgentRun,
   BatchTaskApproveInput,
   DispatchEvaluation,
   EventRecord,
   ExecutionRun,
   HealthStatus,
+  JiraSync,
+  ModelProfileStatus,
+  OperatorQueue,
   Plan,
   ProjectMemory,
   Project,
   ProjectRequirement,
   ResultEvaluation,
+  SearchResponse,
   Task,
   TaskMemory,
   TaskDependency,
@@ -140,12 +147,13 @@ async function readResource<T>(path: string, options: ReadOptions<T>): Promise<A
   }
 }
 
-async function writeResource<T>(path: string, body: unknown) {
+async function writeResource<T>(path: string, body: unknown, headers: HeadersInit = {}) {
   const response = await fetch(resolveUrl(path), {
     method: "POST",
     headers: {
       Accept: "application/json",
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...headers
     },
     cache: "no-store",
     body: JSON.stringify(body)
@@ -163,20 +171,35 @@ async function writeResource<T>(path: string, body: unknown) {
 
 export const controlPlanePaths = {
   health: () => "/health",
+  modelProfiles: () => "/system/models",
+  agentRuns: () => "/system/agent-runs",
+  operatorQueue: () => "/operator/queue",
   projects: () => "/projects",
+  plans: () => "/plans",
+  runs: () => "/runs",
+  search: (query: string) => `/search?q=${encodeURIComponent(query)}`,
   project: (projectId: string) => `/projects/${projectId}`,
   projectRequirements: (projectId: string) => `/projects/${projectId}/requirements`,
   projectPlans: (projectId: string) => `/projects/${projectId}/plans`,
+  projectGeneratePlan: (projectId: string) => `/projects/${projectId}/plan/generate`,
   plan: (planId: string) => `/plans/${planId}`,
   planApprovals: (planId: string) => `/plans/${planId}/approvals`,
   planTasks: (planId: string) => `/plans/${planId}/tasks`,
   planRuns: (planId: string) => `/plans/${planId}/runs`,
+  planGenerateTasks: (planId: string) => `/plans/${planId}/tasks/generate`,
   planApprove: (planId: string) => `/plans/${planId}/approve`,
+  approvalDecision: (approvalId: string) => `/approvals/${approvalId}/decision`,
   task: (taskId: string) => `/tasks/${taskId}`,
   taskDependencies: (taskId: string) => `/tasks/${taskId}/dependencies`,
   taskHistory: (taskId: string) => `/tasks/${taskId}/history`,
   taskSessions: (taskId: string) => `/tasks/${taskId}/sessions`,
   taskRuns: (taskId: string) => `/tasks/${taskId}/runs`,
+  taskJiraSync: (taskId: string) => `/tasks/${taskId}/jira-sync`,
+  taskAutonomyOverride: (taskId: string) => `/tasks/${taskId}/autonomy/override`,
+  taskUnblock: (taskId: string) => `/tasks/${taskId}/unblock`,
+  taskEscalate: (taskId: string) => `/tasks/${taskId}/escalate`,
+  taskRetry: (taskId: string) => `/tasks/${taskId}/retry`,
+  taskFollowUp: (taskId: string) => `/tasks/${taskId}/follow-up`,
   taskEvaluateDispatch: (taskId: string) => `/tasks/${taskId}/evaluate-dispatch`,
   tasksApproveBatch: () => "/tasks/batch/approve",
   session: (sessionId: string) => `/sessions/${sessionId}`,
@@ -198,6 +221,24 @@ export function getHealth() {
   });
 }
 
+export function getModelProfiles() {
+  return readResource<ModelProfileStatus[]>(controlPlanePaths.modelProfiles(), {
+    fallback: []
+  });
+}
+
+export function listAgentRuns() {
+  return readResource<AgentRun[]>(controlPlanePaths.agentRuns(), {
+    fallback: []
+  });
+}
+
+export function getOperatorQueue() {
+  return readResource<OperatorQueue>(controlPlanePaths.operatorQueue(), {
+    fallback: { items: [], total: 0, limit: 50 }
+  });
+}
+
 export function listProjects() {
   return readResource<Project[]>(controlPlanePaths.projects(), {
     fallback: []
@@ -208,6 +249,26 @@ export function getProject(projectId: string) {
   return readResource<Project | null>(controlPlanePaths.project(projectId), {
     fallback: null,
     notFoundDetails: ["Project not found"]
+  });
+}
+
+export function generateProjectPlan(projectId: string, actor: string) {
+  return writeResource<Plan>(controlPlanePaths.projectGeneratePlan(projectId), {}, {
+    "X-OSAI-Actor": actor
+  });
+}
+
+export function listPlans() {
+  return readResource<Plan[]>(controlPlanePaths.plans(), { fallback: [] });
+}
+
+export function listRuns() {
+  return readResource<ExecutionRun[]>(controlPlanePaths.runs(), { fallback: [] });
+}
+
+export function searchResources(query: string) {
+  return readResource<SearchResponse>(controlPlanePaths.search(query), {
+    fallback: { query, items: [] }
   });
 }
 
@@ -245,6 +306,12 @@ export function listPlanTasks(planId: string) {
 export function listPlanRuns(planId: string) {
   return readResource<ExecutionRun[]>(controlPlanePaths.planRuns(planId), {
     fallback: []
+  });
+}
+
+export function generatePlanTasks(planId: string, actor: string) {
+  return writeResource<Task[]>(controlPlanePaths.planGenerateTasks(planId), {}, {
+    "X-OSAI-Actor": actor
   });
 }
 
@@ -350,8 +417,57 @@ export function approvePlan(planId: string, input: ApprovalInput) {
   return writeResource<Approval>(controlPlanePaths.planApprove(planId), input);
 }
 
-export function approveTasks(input: BatchTaskApproveInput) {
-  return writeResource<Task[]>(controlPlanePaths.tasksApproveBatch(), input);
+export function getTaskJiraSync(taskId: string) {
+  return readResource<JiraSync | null>(controlPlanePaths.taskJiraSync(taskId), {
+    fallback: null,
+    notFoundDetails: ["No Jira sync mapping exists for task"]
+  });
+}
+
+export function decidePlanApproval(
+  approvalId: string,
+  input: ApprovalDecisionInput,
+  actor: string
+) {
+  return writeResource<Approval>(controlPlanePaths.approvalDecision(approvalId), input, {
+    "X-OSAI-Actor": actor
+  });
+}
+
+export function approveTasks(input: BatchTaskApproveInput, actor: string) {
+  return writeResource<Task[]>(controlPlanePaths.tasksApproveBatch(), input, { "X-OSAI-Actor": actor });
+}
+
+export function syncTaskToJira(taskId: string, actor: string) {
+  return writeResource<JiraSync>(controlPlanePaths.taskJiraSync(taskId), {}, {
+    "X-OSAI-Actor": actor
+  });
+}
+
+export function createTaskAutonomyOverride(
+  taskId: string,
+  input: AutonomyOverrideInput,
+  actor: string
+) {
+  return writeResource(controlPlanePaths.taskAutonomyOverride(taskId), input, {
+    "X-OSAI-Actor": actor
+  });
+}
+
+export function unblockTask(taskId: string, reason: string, actor: string) {
+  return writeResource(controlPlanePaths.taskUnblock(taskId), { reason }, { "X-OSAI-Actor": actor });
+}
+
+export function escalateTask(taskId: string, reason: string, actor: string) {
+  return writeResource<Task>(controlPlanePaths.taskEscalate(taskId), { reason }, { "X-OSAI-Actor": actor });
+}
+
+export function retryTask(taskId: string, reason: string, actor: string) {
+  return writeResource(controlPlanePaths.taskRetry(taskId), { reason }, { "X-OSAI-Actor": actor });
+}
+
+export function createFollowUpTask(taskId: string, reason: string, actor: string) {
+  return writeResource(controlPlanePaths.taskFollowUp(taskId), { reason }, { "X-OSAI-Actor": actor });
 }
 
 export function evaluateTaskDispatch(taskId: string) {

@@ -812,3 +812,340 @@ CREATE INDEX idx_events_execution_run_occurred_at
 
 CREATE INDEX idx_events_type_occurred_at
     ON events (event_type, occurred_at DESC);
+
+-- Model-agnostic AI runtime. Logical profiles are deliberately limited to
+-- reasoning, execution, and review for the first production release.
+
+CREATE TABLE model_providers (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider_key text NOT NULL UNIQUE,
+    provider_type text NOT NULL,
+    display_name text NOT NULL,
+    base_url text,
+    secret_ref text,
+    enabled boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_model_providers_type CHECK (provider_type IN ('openai_compatible', 'anthropic', 'gemini', 'ollama', 'huggingface', 'test')),
+    CONSTRAINT chk_model_providers_secret_ref CHECK (secret_ref IS NULL OR secret_ref !~* '(api[_-]?key|token|secret)\\s*=')
+);
+
+CREATE TABLE model_configurations (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    profile text NOT NULL UNIQUE,
+    provider_id uuid NOT NULL REFERENCES model_providers(id) ON DELETE RESTRICT,
+    model_name text NOT NULL,
+    temperature numeric(3,2) NOT NULL DEFAULT 0.20,
+    max_output_tokens integer NOT NULL DEFAULT 4096,
+    timeout_seconds integer NOT NULL DEFAULT 60,
+    max_retries integer NOT NULL DEFAULT 1,
+    capabilities jsonb NOT NULL DEFAULT '[]'::jsonb,
+    enabled boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_model_configurations_profile CHECK (profile IN ('reasoning', 'execution', 'review')),
+    CONSTRAINT chk_model_configurations_temperature CHECK (temperature >= 0 AND temperature <= 2),
+    CONSTRAINT chk_model_configurations_output_tokens CHECK (max_output_tokens > 0),
+    CONSTRAINT chk_model_configurations_timeout CHECK (timeout_seconds > 0),
+    CONSTRAINT chk_model_configurations_retries CHECK (max_retries >= 0),
+    CONSTRAINT chk_model_configurations_capabilities_is_array CHECK (jsonb_typeof(capabilities) = 'array')
+);
+
+CREATE TABLE prompt_versions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_key text NOT NULL,
+    version integer NOT NULL,
+    system_prompt text NOT NULL,
+    input_schema jsonb NOT NULL DEFAULT '{}'::jsonb,
+    output_schema jsonb NOT NULL DEFAULT '{}'::jsonb,
+    prompt_checksum text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_prompt_versions_version CHECK (version >= 1),
+    CONSTRAINT chk_prompt_versions_input_schema_is_object CHECK (jsonb_typeof(input_schema) = 'object'),
+    CONSTRAINT chk_prompt_versions_output_schema_is_object CHECK (jsonb_typeof(output_schema) = 'object'),
+    CONSTRAINT uq_prompt_versions_agent_version UNIQUE (agent_key, version),
+    CONSTRAINT uq_prompt_versions_agent_checksum UNIQUE (agent_key, prompt_checksum)
+);
+
+CREATE TABLE agent_definitions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_key text NOT NULL UNIQUE,
+    display_name text NOT NULL,
+    model_profile text NOT NULL REFERENCES model_configurations(profile) ON UPDATE CASCADE,
+    active_prompt_version_id uuid REFERENCES prompt_versions(id) ON DELETE SET NULL,
+    approval_policy text NOT NULL DEFAULT 'approval_required',
+    tool_permissions jsonb NOT NULL DEFAULT '[]'::jsonb,
+    enabled boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_agent_definitions_approval_policy CHECK (approval_policy IN ('manual', 'approval_required', 'constrained_auto', 'fully_auto')),
+    CONSTRAINT chk_agent_definitions_tool_permissions_is_array CHECK (jsonb_typeof(tool_permissions) = 'array')
+);
+
+CREATE TABLE workflow_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    plan_id uuid REFERENCES plans(id) ON DELETE SET NULL,
+    task_id uuid REFERENCES tasks(id) ON DELETE SET NULL,
+    workflow_type text NOT NULL,
+    status text NOT NULL DEFAULT 'created',
+    correlation_id uuid NOT NULL DEFAULT gen_random_uuid(),
+    idempotency_key text,
+    initiated_by text NOT NULL,
+    input_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    output_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    started_at timestamptz,
+    finished_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_workflow_runs_status CHECK (status IN ('created', 'awaiting_approval', 'running', 'blocked', 'failed', 'completed', 'cancelled')),
+    CONSTRAINT chk_workflow_runs_input_payload_is_object CHECK (jsonb_typeof(input_payload) = 'object'),
+    CONSTRAINT chk_workflow_runs_output_payload_is_object CHECK (jsonb_typeof(output_payload) = 'object'),
+    CONSTRAINT chk_workflow_runs_finished_at CHECK (finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at)
+);
+
+CREATE TABLE agent_runs (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_run_id uuid REFERENCES workflow_runs(id) ON DELETE SET NULL,
+    project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    plan_id uuid REFERENCES plans(id) ON DELETE SET NULL,
+    task_id uuid REFERENCES tasks(id) ON DELETE SET NULL,
+    agent_definition_id uuid REFERENCES agent_definitions(id) ON DELETE SET NULL,
+    model_configuration_id uuid REFERENCES model_configurations(id) ON DELETE SET NULL,
+    prompt_version_id uuid REFERENCES prompt_versions(id) ON DELETE SET NULL,
+    agent_key text NOT NULL,
+    model_profile text NOT NULL,
+    status text NOT NULL DEFAULT 'queued',
+    correlation_id uuid NOT NULL,
+    input_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    output_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error_code text,
+    error_message text,
+    started_at timestamptz,
+    finished_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_agent_runs_profile CHECK (model_profile IN ('reasoning', 'execution', 'review')),
+    CONSTRAINT chk_agent_runs_status CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled', 'blocked')),
+    CONSTRAINT chk_agent_runs_input_payload_is_object CHECK (jsonb_typeof(input_payload) = 'object'),
+    CONSTRAINT chk_agent_runs_output_payload_is_object CHECK (jsonb_typeof(output_payload) = 'object'),
+    CONSTRAINT chk_agent_runs_finished_at CHECK (finished_at IS NULL OR started_at IS NULL OR finished_at >= started_at)
+);
+
+CREATE TABLE model_calls (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_run_id uuid NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    model_configuration_id uuid REFERENCES model_configurations(id) ON DELETE SET NULL,
+    provider_key text NOT NULL,
+    provider_model_name text NOT NULL,
+    provider_request_id text,
+    status text NOT NULL,
+    input_tokens integer,
+    output_tokens integer,
+    estimated_cost_usd numeric(12,6),
+    latency_ms integer,
+    error_code text,
+    error_message text,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_model_calls_status CHECK (status IN ('succeeded', 'failed', 'timeout', 'rate_limited', 'cancelled')),
+    CONSTRAINT chk_model_calls_input_tokens CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    CONSTRAINT chk_model_calls_output_tokens CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    CONSTRAINT chk_model_calls_cost CHECK (estimated_cost_usd IS NULL OR estimated_cost_usd >= 0),
+    CONSTRAINT chk_model_calls_latency CHECK (latency_ms IS NULL OR latency_ms >= 0)
+);
+
+CREATE UNIQUE INDEX uq_workflow_runs_project_idempotency_key ON workflow_runs (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+CREATE INDEX idx_workflow_runs_project_status_created_at ON workflow_runs (project_id, status, created_at DESC);
+CREATE INDEX idx_workflow_runs_correlation_id ON workflow_runs (correlation_id);
+CREATE INDEX idx_agent_runs_task_created_at ON agent_runs (task_id, created_at DESC) WHERE task_id IS NOT NULL;
+CREATE INDEX idx_agent_runs_project_status_created_at ON agent_runs (project_id, status, created_at DESC);
+CREATE INDEX idx_agent_runs_correlation_id ON agent_runs (correlation_id);
+CREATE INDEX idx_model_calls_agent_run_created_at ON model_calls (agent_run_id, created_at DESC);
+CREATE INDEX idx_model_calls_provider_status_created_at ON model_calls (provider_key, status, created_at DESC);
+
+CREATE TRIGGER trg_model_providers_set_updated_at BEFORE UPDATE ON model_providers FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_model_configurations_set_updated_at BEFORE UPDATE ON model_configurations FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_agent_definitions_set_updated_at BEFORE UPDATE ON agent_definitions FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_workflow_runs_set_updated_at BEFORE UPDATE ON workflow_runs FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_agent_runs_set_updated_at BEFORE UPDATE ON agent_runs FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Reconcile ORM names with the canonical Phase 4 tables without breaking the
+-- existing Python API contracts during the transition.
+
+ALTER TABLE task_links
+    ADD COLUMN metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN updated_at timestamptz NOT NULL DEFAULT NOW();
+
+ALTER TABLE task_links DROP CONSTRAINT chk_task_links_type;
+ALTER TABLE task_links ADD CONSTRAINT chk_task_links_type CHECK (
+    link_type IN ('follow_up', 'dependency', 'retry', 'bugfix', 'chain')
+);
+CREATE TRIGGER trg_task_links_set_updated_at BEFORE UPDATE ON task_links FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- The Python loop controller has always owned this concept, while older SQL
+-- snapshots only persisted its history. Make the active loop authoritative.
+CREATE TABLE IF NOT EXISTS task_loops (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    status text NOT NULL DEFAULT 'idle',
+    current_action text,
+    retry_count integer NOT NULL DEFAULT 0,
+    consecutive_failures integer NOT NULL DEFAULT 0,
+    chain_depth integer NOT NULL DEFAULT 0,
+    follow_up_count integer NOT NULL DEFAULT 0,
+    last_result_status text,
+    last_bug_category text,
+    last_failure_pattern text,
+    last_task_session_id uuid REFERENCES task_sessions(id) ON DELETE SET NULL,
+    last_run_id uuid REFERENCES execution_runs(id) ON DELETE SET NULL,
+    loop_started_at timestamptz NOT NULL DEFAULT NOW(),
+    last_transition_at timestamptz NOT NULL DEFAULT NOW(),
+    timeout_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_task_loops_counts CHECK (
+        retry_count >= 0 AND consecutive_failures >= 0 AND chain_depth >= 0 AND follow_up_count >= 0
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_task_loops_one_active_per_task
+    ON task_loops (task_id)
+    WHERE status NOT IN ('completed', 'cancelled', 'failed');
+CREATE INDEX IF NOT EXISTS idx_task_loops_task_updated_at
+    ON task_loops (task_id, updated_at DESC);
+CREATE TRIGGER trg_task_loops_set_updated_at BEFORE UPDATE ON task_loops FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+ALTER TABLE task_history
+    ALTER COLUMN state SET DEFAULT 'recorded',
+    ADD COLUMN task_loop_id uuid REFERENCES task_loops(id) ON DELETE SET NULL,
+    ADD COLUMN task_session_id uuid REFERENCES task_sessions(id) ON DELETE SET NULL,
+    ADD COLUMN execution_run_id uuid REFERENCES execution_runs(id) ON DELETE SET NULL,
+    ADD COLUMN action text,
+    ADD COLUMN task_status text,
+    ADD COLUMN result_status text,
+    ADD COLUMN bug_category text,
+    ADD COLUMN failure_pattern_key text,
+    ADD COLUMN retry_count integer NOT NULL DEFAULT 0,
+    ADD COLUMN chain_depth integer NOT NULL DEFAULT 0,
+    ADD COLUMN summary text,
+    ADD COLUMN payload jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+CREATE INDEX idx_task_history_task_loop_created_at
+    ON task_history (task_loop_id, "timestamp" DESC)
+    WHERE task_loop_id IS NOT NULL;
+
+ALTER TABLE policy_overrides
+    ALTER COLUMN override_type SET DEFAULT 'autonomy_override',
+    ADD COLUMN scope text,
+    ADD COLUMN status text NOT NULL DEFAULT 'active',
+    ADD COLUMN force_autonomy_mode text,
+    ADD COLUMN force_review boolean NOT NULL DEFAULT false,
+    ADD COLUMN disable_retries boolean NOT NULL DEFAULT false,
+    ADD COLUMN sensitive_modules jsonb NOT NULL DEFAULT '[]'::jsonb,
+    ADD COLUMN policy_adjustments jsonb NOT NULL DEFAULT '{}'::jsonb,
+    ADD COLUMN updated_at timestamptz NOT NULL DEFAULT NOW();
+
+UPDATE policy_overrides
+SET scope = CASE WHEN task_id IS NULL THEN 'project' ELSE 'task' END
+WHERE scope IS NULL;
+ALTER TABLE policy_overrides ALTER COLUMN scope SET NOT NULL;
+ALTER TABLE policy_overrides
+    ADD CONSTRAINT chk_policy_overrides_scope CHECK (scope IN ('project', 'task')),
+    ADD CONSTRAINT chk_policy_overrides_sensitive_modules_is_array CHECK (jsonb_typeof(sensitive_modules) = 'array'),
+    ADD CONSTRAINT chk_policy_overrides_policy_adjustments_is_object CHECK (jsonb_typeof(policy_adjustments) = 'object');
+CREATE TRIGGER trg_policy_overrides_set_updated_at BEFORE UPDATE ON policy_overrides FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE INDEX idx_policy_overrides_project_status_created_at
+    ON policy_overrides (project_id, status, created_at DESC);
+
+-- Approval requests are durable commands. An actor requests, another actor
+-- decides, and duplicate client retries return the original decision.
+
+ALTER TABLE approvals
+    ADD COLUMN expected_plan_updated_at timestamptz,
+    ADD COLUMN idempotency_key text,
+    ADD COLUMN decision_idempotency_key text,
+    ADD COLUMN decision_version integer NOT NULL DEFAULT 1;
+
+ALTER TABLE approvals
+    ADD CONSTRAINT chk_approvals_status CHECK (status IN ('pending', 'approved', 'rejected', 'changes_requested')),
+    ADD CONSTRAINT chk_approvals_decision_version CHECK (decision_version >= 1);
+
+CREATE UNIQUE INDEX uq_approvals_plan_request_idempotency
+    ON approvals (plan_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_approvals_decision_idempotency
+    ON approvals (decision_idempotency_key)
+    WHERE decision_idempotency_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_approvals_one_pending_per_plan
+    ON approvals (plan_id)
+    WHERE status = 'pending';
+
+-- Durable idempotency record for Jira issue creation. A task maps to one
+-- external issue; retries reuse the task label before creating anything.
+
+CREATE TABLE jira_issue_mappings (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sync_status text NOT NULL DEFAULT 'pending',
+    external_issue_key text,
+    external_issue_url text,
+    idempotency_key text NOT NULL UNIQUE,
+    request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error_message text,
+    attempt_count integer NOT NULL DEFAULT 0,
+    last_attempt_at timestamptz,
+    synchronized_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_jira_issue_mappings_status CHECK (sync_status IN ('pending', 'synchronized', 'failed', 'disabled')),
+    CONSTRAINT chk_jira_issue_mappings_request_payload CHECK (jsonb_typeof(request_payload) = 'object'),
+    CONSTRAINT chk_jira_issue_mappings_attempt_count CHECK (attempt_count >= 0),
+    CONSTRAINT chk_jira_issue_mappings_success_key CHECK (
+        sync_status <> 'synchronized' OR NULLIF(btrim(external_issue_key), '') IS NOT NULL
+    )
+);
+
+CREATE INDEX idx_jira_issue_mappings_project_status_updated_at
+    ON jira_issue_mappings (project_id, sync_status, updated_at DESC);
+CREATE INDEX idx_jira_issue_mappings_retryable
+    ON jira_issue_mappings (updated_at ASC)
+    WHERE sync_status IN ('pending', 'failed');
+CREATE TRIGGER trg_jira_issue_mappings_set_updated_at
+BEFORE UPDATE ON jira_issue_mappings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+-- Durable idempotency record for Jira issue creation. A task maps to one
+-- external issue; retries reuse the task label before creating anything.
+
+CREATE TABLE jira_issue_mappings (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id uuid NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+    project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    sync_status text NOT NULL DEFAULT 'pending',
+    external_issue_key text,
+    external_issue_url text,
+    idempotency_key text NOT NULL UNIQUE,
+    request_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+    error_message text,
+    attempt_count integer NOT NULL DEFAULT 0,
+    last_attempt_at timestamptz,
+    synchronized_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    updated_at timestamptz NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_jira_issue_mappings_status CHECK (sync_status IN ('pending', 'synchronized', 'failed', 'disabled')),
+    CONSTRAINT chk_jira_issue_mappings_request_payload CHECK (jsonb_typeof(request_payload) = 'object'),
+    CONSTRAINT chk_jira_issue_mappings_attempt_count CHECK (attempt_count >= 0),
+    CONSTRAINT chk_jira_issue_mappings_success_key CHECK (
+        sync_status <> 'synchronized' OR NULLIF(btrim(external_issue_key), '') IS NOT NULL
+    )
+);
+
+CREATE INDEX idx_jira_issue_mappings_project_status_updated_at
+    ON jira_issue_mappings (project_id, sync_status, updated_at DESC);
+CREATE INDEX idx_jira_issue_mappings_retryable
+    ON jira_issue_mappings (updated_at ASC)
+    WHERE sync_status IN ('pending', 'failed');
+CREATE TRIGGER trg_jira_issue_mappings_set_updated_at
+BEFORE UPDATE ON jira_issue_mappings
+FOR EACH ROW EXECUTE FUNCTION set_updated_at();

@@ -136,9 +136,68 @@ def apply_task_autonomy_override(
             "policy_adjustments": override.policy_adjustments,
         },
     )
+    # A block is safety-critical: replace the prior execution contract before
+    # this request succeeds. Other overrides deliberately apply at the next
+    # evaluation, so a review-only change does not mutate task state twice.
+    if override.force_autonomy_mode == "blocked":
+        evaluate_task_dispatch(session, task_id, commit=False)
     session.commit()
     session.refresh(override)
     return AutonomyOverrideRead.model_validate(override)
+
+
+def unblock_task_autonomy(session: Session, task_id, *, actor: str, reason: str) -> TaskAutonomyRead:
+    """Revoke task-scoped block overrides and issue a replacement contract."""
+    task_context = get_task_context(session, task_id)
+    active_blocks = session.exec(
+        select(AutonomyOverride).where(
+            AutonomyOverride.task_id == task_context.task.id,
+            AutonomyOverride.status == "active",
+            AutonomyOverride.force_autonomy_mode == "blocked",
+        )
+    ).all()
+    if not active_blocks:
+        raise ValueError("No active task-scoped block override exists to remove.")
+    for override in active_blocks:
+        override.status = "revoked"
+        override.updated_at = datetime.now(timezone.utc)
+        session.add(override)
+    create_event(
+        session,
+        project_id=task_context.project.id,
+        plan_id=task_context.plan.id,
+        task_id=task_context.task.id,
+        event_source="control_plane.autonomy_policy_engine",
+        event_type="autonomy.override_revoked",
+        payload={
+            "actor": actor,
+            "reason": reason,
+            "override_ids": [str(override.id) for override in active_blocks],
+        },
+    )
+    evaluate_task_dispatch(session, task_id, commit=False)
+    session.commit()
+    return get_task_autonomy(session, task_id)
+
+
+def escalate_task_to_operator(session: Session, task_id, *, actor: str, reason: str) -> Task:
+    """Place a task in an explicit human-owned escalation state."""
+    task_context = get_task_context(session, task_id)
+    task_context.task.status = "escalated"
+    task_context.task.updated_at = datetime.now(timezone.utc)
+    session.add(task_context.task)
+    create_event(
+        session,
+        project_id=task_context.project.id,
+        plan_id=task_context.plan.id,
+        task_id=task_context.task.id,
+        event_source="control_plane.operator",
+        event_type="task.escalated",
+        payload={"actor": actor, "reason": reason, "status": "escalated"},
+    )
+    session.commit()
+    session.refresh(task_context.task)
+    return task_context.task
 
 
 def get_project_autonomy_summary(session: Session, project_id) -> ProjectAutonomySummaryRead:

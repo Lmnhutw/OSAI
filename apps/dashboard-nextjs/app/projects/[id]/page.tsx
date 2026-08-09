@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/empty-state";
+import { ProjectPlanGenerationForm } from "@/components/generation-forms";
 import { KeyValueGrid } from "@/components/key-value-grid";
 import { ProjectMemoryPanel } from "@/components/memory-panels";
 import { PageHeader } from "@/components/page-header";
@@ -93,7 +94,14 @@ export default async function ProjectDetailPage({ params }: ProjectDetailPagePro
           project.data?.description ||
           "Track requirements, versioned plans, grouped task status, and recent execution activity."
         }
-        actions={project.data ? <StatusBadge status={project.data.status} /> : null}
+        actions={
+          project.data ? (
+            <div className="flex flex-wrap items-center gap-3">
+              <StatusBadge status={project.data.status} />
+              <ProjectPlanGenerationForm projectId={project.data.id} />
+            </div>
+          ) : null
+        }
       />
 
       <ResourceNotice

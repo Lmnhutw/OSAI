@@ -4,3 +4,5 @@ sqlmodel>=0.0.14
 psycopg2-binary>=2.9.9
 asyncpg>=0.28.0
 pydantic>=2.0.0
+# FastAPI/Starlette API workflow tests.
+httpx2>=0.28.0

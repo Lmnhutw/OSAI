@@ -23,6 +23,7 @@ from ..models import (
     TaskRelationship,
     TaskSession,
 )
+from .. import ai_models  # noqa: F401 - register durable autonomy tables for test metadata
 from ..schemas import PolicyDecisionRead
 
 ACCEPTANCE_KEYS = (
@@ -550,7 +551,7 @@ def record_autonomy_decision(
     run_id=None,
     task_session_id=None,
 ) -> Event:
-    return create_event(
+    event = create_event(
         session,
         project_id=task_context.project.id,
         plan_id=task_context.plan.id,
@@ -569,3 +570,16 @@ def record_autonomy_decision(
             "policy_decision": policy_decision.model_dump(mode="json"),
         },
     )
+    # Import lazily to keep common read-model helpers independent of the
+    # persistence models used only while a decision is being recorded.
+    from .execution_contract_service import record_persistent_execution_contract
+
+    record_persistent_execution_contract(
+        session,
+        task_context=task_context,
+        stage=stage,
+        policy_decision=policy_decision,
+        task_status=task_status,
+        run_id=run_id,
+    )
+    return event

@@ -97,6 +97,11 @@ def _thresholds(overrides: ResolvedOverrides) -> Dict[str, float]:
     }
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Normalize ORM timestamps before comparing PostgreSQL and SQLite values."""
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def _loop_policy_defaults(task_type: str, classification_category: str, overrides: ResolvedOverrides) -> dict:
     high_risk = task_type in {"verification", "migration", "database", "infra", "security", "deployment"} or classification_category in APPROVAL_CLASSES
     defaults = {
@@ -630,7 +635,9 @@ def evaluate_loop_policy(
 
     retry_budget_exceeded = loop_state.retry_count >= int(defaults["max_retry"])
     chain_depth_exceeded = loop_state.chain_depth >= int(defaults["max_chain_depth"])
-    loop_timeout_exceeded = bool(loop_state.timeout_at and loop_state.timeout_at <= datetime.now(timezone.utc))
+    loop_timeout_exceeded = bool(
+        loop_state.timeout_at and _as_utc(loop_state.timeout_at) <= datetime.now(timezone.utc)
+    )
     recurring_patterns = [pattern for pattern in failure_patterns if pattern.recurring]
 
     hard_block = bool(sensitive_scope.forbidden_actions) or classification.category == "human_only"

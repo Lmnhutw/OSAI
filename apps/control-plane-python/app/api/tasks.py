@@ -3,7 +3,9 @@ from sqlmodel import Session, select
 from typing import List
 import uuid
 
-from ..models import Event, ExecutionRun, Task, TaskDependency, TaskLoopHistory, TaskSession
+from ..ai_models import JiraIssueMapping
+from ..authz import approval_actor
+from ..models import Event, ExecutionRun, Plan, Task, TaskDependency, TaskLoopHistory, TaskSession
 from ..schemas import (
     AutonomyEvaluationRequest,
     AutonomyOverrideCreate,
@@ -13,6 +15,7 @@ from ..schemas import (
     ExecutionRunRead,
     FollowUpTaskCreateRequest,
     FollowUpTaskRead,
+    JiraSyncRead,
     LoopDecisionRead,
     LoopNextRequest,
     ResultEvaluationRead,
@@ -23,6 +26,7 @@ from ..schemas import (
     TaskHistoryRead,
     TaskLoopHistoryEntryRead,
     TaskLoopStateRead,
+    TaskOperatorActionCreate,
     TaskRelationshipRead,
     TaskRead,
     TaskSessionRead,
@@ -30,8 +34,10 @@ from ..schemas import (
 )
 from ..services.autonomy_service import (
     apply_task_autonomy_override,
+    escalate_task_to_operator,
     evaluate_task_autonomy,
     get_task_autonomy,
+    unblock_task_autonomy,
 )
 from ..database import get_session
 from ..services.bug_triage_agent import triage_run_failure
@@ -47,6 +53,8 @@ from ..services.control_plane_support import (
 from ..services.dispatch_evaluator import evaluate_task_dispatch
 from ..services.failure_patterns import detect_failure_patterns
 from ..services.loop_controller import advance_execution_loop
+from ..services.jira_integration import JiraConfigurationError, JiraSyncError, sync_task_to_jira
+from ..services.execution_contract_service import issue_operator_approved_execution_contract
 from ..services.policy_engine import DEFAULT_LOOP_TIMEOUT_SECONDS, evaluate_loop_policy
 from ..services.retry_manager import get_or_create_task_loop_state, schedule_retry
 from ..services.task_chainer import create_follow_up_task
@@ -79,6 +87,31 @@ def get_task(task_id: uuid.UUID, session: Session = Depends(get_session)):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
+
+
+@router.get("/{task_id}/jira-sync", response_model=JiraSyncRead)
+def get_jira_sync(task_id: uuid.UUID, session: Session = Depends(get_session)):
+    mapping = session.exec(select(JiraIssueMapping).where(JiraIssueMapping.task_id == task_id)).first()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="No Jira sync mapping exists for task")
+    return mapping
+
+
+@router.post("/{task_id}/jira-sync", response_model=JiraSyncRead)
+def sync_jira_task(
+    task_id: uuid.UUID,
+    actor: str = Depends(approval_actor),
+    session: Session = Depends(get_session),
+):
+    task = session.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        return sync_task_to_jira(session, task=task, actor=actor)
+    except JiraConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except JiraSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 @router.get("/{task_id}/dependencies", response_model=List[TaskDependencyRead])
 def list_task_dependencies(task_id: uuid.UUID, session: Session = Depends(get_session)):
@@ -120,6 +153,7 @@ def list_task_runs(task_id: uuid.UUID, session: Session = Depends(get_session)):
 @router.post("/batch/approve", response_model=List[TaskRead])
 def approve_tasks_batch(
     approval_in: BatchTaskApprove,
+    actor: str = Depends(approval_actor),
     session: Session = Depends(get_session)
 ):
     # Fetch all tasks matching the provided IDs
@@ -128,11 +162,43 @@ def approve_tasks_batch(
     if not tasks:
         raise HTTPException(status_code=404, detail="No tasks found for the provided IDs")
     
-    # Optional context: if we need to verify they are all pending
+    invalid = []
     for task in tasks:
-        if task.status == "pending":
-            task.status = "approved"
-            session.add(task)
+        plan = session.get(Plan, task.plan_id)
+        if not plan or plan.status != "approved":
+            invalid.append(f"{task.id}: plan is not approved")
+        elif task.status not in {"pending", "ready_for_dispatch", "approved"}:
+            invalid.append(f"{task.id}: cannot approve from {task.status}")
+    if not invalid:
+        evaluations = {task.id: evaluate_task_dispatch(session, task.id, commit=False) for task in tasks}
+        for task in tasks:
+            policy = evaluations[task.id].policy_decision
+            if policy.block:
+                invalid.append(f"{task.id}: policy blocked dispatch")
+    if invalid:
+        session.rollback()
+        raise HTTPException(status_code=409, detail={"message": "Task approval conflict", "items": invalid})
+
+    # A dispatch evaluation may safely advance a task to ready_for_dispatch
+    # before the operator releases it to the worker queue.
+    for task in tasks:
+        task_context = get_task_context(session, task.id)
+        contract = issue_operator_approved_execution_contract(
+            session,
+            task_context=task_context,
+            actor=actor,
+        )
+        task_context.task.status = "approved"
+        session.add(task_context.task)
+        create_event(
+            session,
+            project_id=task_context.project.id,
+            plan_id=task_context.plan.id,
+            task_id=task.id,
+            event_source="control_plane.task_approval",
+            event_type="task.approved",
+            payload={"actor": actor, "execution_contract_id": str(contract.id)},
+        )
             
     session.commit()
     for task in tasks:
@@ -173,6 +239,7 @@ def loop_next(
 def retry_task(
     task_id: uuid.UUID,
     retry_in: RetryRequest | None = None,
+    actor: str = Depends(approval_actor),
     session: Session = Depends(get_session),
 ):
     result_evaluation = _result_evaluation_or_404(
@@ -238,6 +305,7 @@ def retry_task(
             chain_depth=loop_state.chain_depth,
             summary="Manual retry requested after the latest result evaluation.",
             payload={
+                "actor": actor,
                 "retry_response": retry_response.model_dump(mode="json"),
                 "policy_decision": loop_policy.model_dump(mode="json"),
                 "bug_triage": bug_triage.model_dump(mode="json"),
@@ -253,7 +321,7 @@ def retry_task(
             execution_run_id=result_evaluation.run_id,
             event_source="control_plane.retry_manager",
             event_type="loop.manual_retry_requested",
-            payload=retry_response.model_dump(mode="json"),
+            payload={**retry_response.model_dump(mode="json"), "actor": actor},
         )
         session.commit()
         return retry_response
@@ -293,10 +361,17 @@ def get_autonomy(task_id: uuid.UUID, session: Session = Depends(get_session)):
 def override_autonomy(
     task_id: uuid.UUID,
     override_in: AutonomyOverrideCreate,
+    actor: str = Depends(approval_actor),
     session: Session = Depends(get_session),
 ):
     try:
-        return apply_task_autonomy_override(session, task_id, override_in)
+        # The caller identity comes from the authenticated request, never from
+        # a user-controlled JSON field.
+        return apply_task_autonomy_override(
+            session,
+            task_id,
+            override_in.model_copy(update={"operator": actor}),
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -305,6 +380,7 @@ def override_autonomy(
 def create_follow_up(
     task_id: uuid.UUID,
     follow_up_in: FollowUpTaskCreateRequest,
+    actor: str = Depends(approval_actor),
     session: Session = Depends(get_session),
 ):
     try:
@@ -317,19 +393,7 @@ def create_follow_up(
         )
         jira_sync_status = "skipped"
         if follow_up_in.push_to_jira:
-            jira_sync_status = "requested_not_configured"
-            create_event(
-                session,
-                project_id=task_context.project.id,
-                plan_id=task_context.plan.id,
-                task_id=task_context.task.id,
-                event_source="control_plane.follow_up_manager",
-                event_type="integration.jira_follow_up_requested",
-                payload={
-                    "parent_task_id": str(task_context.task.id),
-                    "follow_up_task_id": str(task.id),
-                },
-            )
+            jira_sync_status = sync_task_to_jira(session, task=task, actor=actor).sync_status
         create_event(
             session,
             project_id=task_context.project.id,
@@ -356,6 +420,38 @@ def create_follow_up(
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/unblock", response_model=TaskAutonomyRead)
+def unblock_autonomy(
+    task_id: uuid.UUID,
+    action_in: TaskOperatorActionCreate,
+    actor: str = Depends(approval_actor),
+    session: Session = Depends(get_session),
+):
+    try:
+        return unblock_task_autonomy(session, task_id, actor=actor, reason=action_in.reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/escalate", response_model=TaskRead)
+def escalate_task(
+    task_id: uuid.UUID,
+    action_in: TaskOperatorActionCreate,
+    actor: str = Depends(approval_actor),
+    session: Session = Depends(get_session),
+):
+    try:
+        return escalate_task_to_operator(session, task_id, actor=actor, reason=action_in.reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except JiraConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except JiraSyncError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/{task_id}/history", response_model=TaskHistoryRead)

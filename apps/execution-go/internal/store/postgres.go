@@ -44,8 +44,86 @@ func (s *PostgresStore) ClaimReadyTask(ctx context.Context, jiraIssueKey, worker
 
 	row := tx.QueryRow(ctx, `
 WITH candidate AS (
-    SELECT t.id, t.plan_id, t.position, t.task_type, t.title, t.instructions, t.status, t.input_payload, t.created_at, t.updated_at
+    SELECT
+        t.id,
+        t.plan_id,
+        t.position,
+        t.task_type,
+        t.title,
+        t.instructions,
+        t.status,
+        COALESCE(t.input_payload, '{}'::jsonb) || jsonb_build_object(
+            'execution_contract', jsonb_build_object(
+                'id', contract.id::text,
+                'task_id', t.id::text,
+                'execution_mode', contract.execution_mode,
+                'allowed_actions', contract.allowed_actions,
+                'retry', jsonb_build_object(
+                    'allowed', contract.retry_limit > 0,
+                    'max_retry', contract.retry_limit
+                ),
+                'branch_policy', jsonb_build_object(
+                    'target_branch', 'codex/osai-' || t.id::text,
+                    'approved_target_branch', 'codex/osai-' || t.id::text,
+                    'allowed_target_branches', jsonb_build_array('codex/osai-' || t.id::text),
+                    'require_approved_target', true,
+                    'approved', true
+                ),
+                'write_permissions', jsonb_build_object(
+                    'allow_write', contract.write_permission = 'workspace_only',
+                    'read_only', contract.execution_mode = 'inspect_only',
+                    'dry_run', contract.execution_mode <> 'execute_with_validation',
+                    'workspace_only', true,
+                    'no_autonomous_write', contract.write_permission <> 'workspace_only'
+                ),
+                'approval', jsonb_build_object(
+                    'required', contract.approval_state <> 'not_required',
+                    'approved', contract.approval_state IN ('approved', 'not_required'),
+                    'reference', 'autonomy://decision/' || contract.autonomy_decision_id::text
+                ),
+                'expires_at', contract.expires_at,
+                'policy_version', 'phase4',
+                'autonomy_reasoning_ref', 'autonomy://decision/' || contract.autonomy_decision_id::text
+            ),
+            'policy_snapshot', jsonb_build_object(
+                'version', 'phase4',
+                'autonomy_mode', CASE WHEN contract.approval_state = 'approved' THEN 'auto_execute' ELSE contract.autonomy_mode END,
+                'approval_required', contract.approval_required,
+                'review_required', CASE WHEN contract.approval_state = 'approved' THEN false ELSE contract.review_required END,
+                'retry_allowed', contract.retry_limit > 0,
+                'max_retry', contract.retry_limit,
+                'block', contract.autonomy_mode = 'blocked',
+                'allowed_actions', CASE WHEN contract.approval_state = 'approved' THEN jsonb_build_array('dispatch_execution') ELSE contract.decision_allowed_actions END,
+                'sensitive_scope', contract.sensitive_scope_flags
+            )
+        ) AS input_payload,
+        t.created_at,
+        t.updated_at
     FROM tasks t
+    JOIN LATERAL (
+        SELECT
+            ec.id,
+            ec.autonomy_decision_id,
+            ec.execution_mode,
+            ec.allowed_actions,
+            ec.retry_limit,
+            ec.write_permission,
+            ec.approval_state,
+            ec.expires_at,
+            ad.autonomy_mode,
+            ad.approval_required,
+            ad.review_required,
+            ad.allowed_actions AS decision_allowed_actions,
+            ad.sensitive_scope_flags
+        FROM execution_contracts ec
+        JOIN autonomy_decisions ad ON ad.id = ec.autonomy_decision_id
+        WHERE ec.task_id = t.id
+          AND ec.approval_state IN ('approved', 'not_required')
+          AND (ec.expires_at IS NULL OR ec.expires_at > NOW())
+          AND ec.execution_mode <> 'blocked'
+        ORDER BY ec.issued_at DESC
+        LIMIT 1
+    ) contract ON TRUE
     WHERE t.status = 'approved'
       AND COALESCE(
             t.input_payload->>'jira_issue_key',

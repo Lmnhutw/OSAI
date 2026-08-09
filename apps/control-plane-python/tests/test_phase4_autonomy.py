@@ -1,9 +1,11 @@
 import unittest
 
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 
+from app.ai_models import AutonomyDecision, ExecutionContract
+from app.api.tasks import approve_tasks_batch
 from app.models import Plan, Project, Task
-from app.schemas import AutonomyOverrideCreate
+from app.schemas import AutonomyOverrideCreate, BatchTaskApprove
 from app.services.autonomy_service import (
     apply_task_autonomy_override,
     get_project_autonomy_summary,
@@ -79,6 +81,12 @@ class Phase4AutonomyTests(unittest.TestCase):
 
         self.assertTrue(evaluation.policy_decision.allow_auto_execute)
         self.assertEqual(evaluation.policy_decision.autonomy_mode, "auto_execute")
+        decision = self.session.exec(select(AutonomyDecision).where(AutonomyDecision.task_id == task.id)).one()
+        contract = self.session.exec(select(ExecutionContract).where(ExecutionContract.task_id == task.id)).one()
+        self.assertEqual(decision.autonomy_mode, "auto_execute")
+        self.assertEqual(contract.autonomy_decision_id, decision.id)
+        self.assertEqual(contract.approval_state, "not_required")
+        self.assertEqual(task.input_payload["execution_contract"]["id"], str(contract.id))
         autonomy = get_task_autonomy(self.session, task.id)
         self.assertEqual(autonomy.policy_decision.task_classification, "test_only")
 
@@ -101,6 +109,31 @@ class Phase4AutonomyTests(unittest.TestCase):
         self.assertEqual(evaluation.policy_decision.task_classification, "schema_sensitive")
         self.assertEqual(evaluation.policy_decision.autonomy_mode, "approval_required")
         self.assertTrue(evaluation.policy_decision.require_approval)
+
+    def test_operator_task_approval_issues_a_new_authoritative_contract(self):
+        task = self._create_task(
+            title="Add test coverage",
+            instructions="Only add tests and validation evidence under apps/control-plane-python/tests.",
+            input_payload={
+                "acceptance_criteria": ["add tests", "capture validation evidence"],
+                "constraints": ["Only modify apps/control-plane-python/tests"],
+            },
+        )
+
+        approved = approve_tasks_batch(
+            BatchTaskApprove(task_ids=[task.id]),
+            actor="operator@example.com",
+            session=self.session,
+        )
+
+        self.assertEqual(approved[0].status, "approved")
+        contracts = self.session.exec(
+            select(ExecutionContract)
+            .where(ExecutionContract.task_id == task.id)
+            .order_by(ExecutionContract.issued_at.desc())
+        ).all()
+        self.assertEqual(contracts[0].approval_state, "approved")
+        self.assertEqual(contracts[0].execution_mode, "execute_with_validation")
 
     def test_override_can_force_review_and_disable_retries(self):
         task = self._create_task(

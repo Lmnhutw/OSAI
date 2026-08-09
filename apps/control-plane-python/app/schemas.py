@@ -75,6 +75,10 @@ class ApprovalRead(BaseModel):
     decision_note: Optional[str] = None
     requested_at: datetime
     decided_at: Optional[datetime] = None
+    expected_plan_updated_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = None
+    decision_idempotency_key: Optional[str] = None
+    decision_version: int = 1
     created_at: datetime
     updated_at: datetime
 
@@ -241,7 +245,9 @@ class PolicyDecisionRead(BaseModel):
 
 
 class AutonomyOverrideCreate(BaseModel):
-    operator: str
+    # The API resolves this from the authenticated request actor. It remains
+    # optional only for trusted in-process service callers and legacy clients.
+    operator: Optional[str] = None
     reason: str
     apply_to_project: bool = False
     force_autonomy_mode: Optional[str] = None
@@ -508,3 +514,126 @@ class ProjectAutonomySummaryRead(BaseModel):
     sensitive_scope_counts: Dict[str, int] = Field(default_factory=dict)
     tasks: List[ProjectAutonomyTaskSummaryRead] = Field(default_factory=list)
     generated_at: datetime
+
+
+class ModelProfileStatusRead(BaseModel):
+    profile: str
+    configured: bool
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class AgentRunRead(BaseModel):
+    id: uuid.UUID
+    workflow_run_id: Optional[uuid.UUID] = None
+    project_id: uuid.UUID
+    plan_id: Optional[uuid.UUID] = None
+    task_id: Optional[uuid.UUID] = None
+    agent_key: str
+    model_profile: str
+    status: str
+    correlation_id: uuid.UUID
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TaskOperatorActionCreate(BaseModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class ApprovalRequestCreate(BaseModel):
+    requested_by: str
+    decision_note: Optional[str] = None
+    expected_plan_updated_at: Optional[datetime] = None
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class ApprovalDecisionCreate(BaseModel):
+    decision: str = Field(pattern="^(approved|rejected|changes_requested)$")
+    decision_note: Optional[str] = None
+    expected_plan_updated_at: Optional[datetime] = None
+    idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class OperatorQueueItemRead(BaseModel):
+    item_type: str
+    status: str
+    title: str
+    project_id: uuid.UUID
+    plan_id: Optional[uuid.UUID] = None
+    task_id: Optional[uuid.UUID] = None
+    approval_id: Optional[uuid.UUID] = None
+    requested_by: Optional[str] = None
+    created_at: datetime
+
+
+class OperatorQueueRead(BaseModel):
+    items: List[OperatorQueueItemRead] = Field(default_factory=list)
+    total: int
+    limit: int
+
+
+class ProjectOverviewRead(BaseModel):
+    project: ProjectRead
+    latest_plan: Optional[PlanRead] = None
+    task_status_counts: Dict[str, int] = Field(default_factory=dict)
+    pending_approval_count: int = 0
+    recent_events: List[EventRead] = Field(default_factory=list)
+
+
+class TaskWorkbenchRead(BaseModel):
+    task: TaskRead
+    plan: PlanRead
+    sessions: List[TaskSessionRead] = Field(default_factory=list)
+    runs: List[ExecutionRunRead] = Field(default_factory=list)
+    recent_events: List[EventRead] = Field(default_factory=list)
+
+
+class RunInspectionRead(BaseModel):
+    run: ExecutionRunRead
+    task: TaskRead
+    plan: PlanRead
+    session: TaskSessionRead
+    events: List[EventRead] = Field(default_factory=list)
+
+
+class JiraSyncRead(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    project_id: uuid.UUID
+    sync_status: str
+    external_issue_key: Optional[str] = None
+    external_issue_url: Optional[str] = None
+    error_message: Optional[str] = None
+    attempt_count: int
+    last_attempt_at: Optional[datetime] = None
+    synchronized_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SearchItemRead(BaseModel):
+    resource_type: str
+    resource_id: uuid.UUID
+    project_id: Optional[uuid.UUID] = None
+    plan_id: Optional[uuid.UUID] = None
+    title: str
+    subtitle: Optional[str] = None
+    status: Optional[str] = None
+
+
+class SearchResponseRead(BaseModel):
+    query: str
+    items: List[SearchItemRead] = Field(default_factory=list)

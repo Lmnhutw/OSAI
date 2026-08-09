@@ -5,7 +5,9 @@ import { TaskApprovalForm } from "@/components/approval-forms";
 import { CollapsibleLog } from "@/components/collapsible-log";
 import { EventTimeline } from "@/components/event-timeline";
 import { KeyValueGrid } from "@/components/key-value-grid";
+import { JiraSyncPanel } from "@/components/jira-sync-panel";
 import { TaskMemoryPanel } from "@/components/memory-panels";
+import { TaskOperatorActions } from "@/components/task-operator-actions";
 import { PageHeader } from "@/components/page-header";
 import { ResourceNotice } from "@/components/resource-notice";
 import { RunsTable } from "@/components/runs-table";
@@ -20,6 +22,7 @@ import {
   getPlan,
   getTask,
   getTaskHistory,
+  getTaskJiraSync,
   getTaskMemory,
   listPlanTasks,
   listSessionEvents,
@@ -35,24 +38,49 @@ interface TaskDetailPageProps {
   params: Promise<{
     id: string;
   }>;
+  searchParams: Promise<{
+    tab?: string;
+  }>;
 }
 
-export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
+const workbenchTabs = ["summary", "decision", "execution", "evidence", "memory", "history"] as const;
+type WorkbenchTab = (typeof workbenchTabs)[number];
+
+function isWorkbenchTab(value: string | undefined): value is WorkbenchTab {
+  return Boolean(value && workbenchTabs.includes(value as WorkbenchTab));
+}
+
+function WorkbenchPanel({
+  active,
+  current,
+  children
+}: {
+  active: WorkbenchTab;
+  current: WorkbenchTab;
+  children: React.ReactNode;
+}) {
+  return active === current ? children : null;
+}
+
+export default async function TaskDetailPage({ params, searchParams }: TaskDetailPageProps) {
   const { id } = await params;
+  const requestedTab = (await searchParams).tab;
+  const activeTab: WorkbenchTab = isWorkbenchTab(requestedTab) ? requestedTab : "summary";
   const task = await getTask(id);
 
   if (task.state === "not_found") {
     notFound();
   }
 
-  const [plan, planTasks, dependencies, sessions, runs, taskHistory] = task.data
+  const [plan, planTasks, dependencies, sessions, runs, taskHistory, jiraSync] = task.data
     ? await Promise.all([
         getPlan(task.data.plan_id),
         listPlanTasks(task.data.plan_id),
         listTaskDependencies(task.data.id),
         listTaskSessions(task.data.id),
         listTaskRuns(task.data.id),
-        getTaskHistory(task.data.id)
+        getTaskHistory(task.data.id),
+        getTaskJiraSync(task.data.id)
       ])
     : [
         emptyResource(null, `/plans/${id}`),
@@ -69,7 +97,8 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
             entries: []
           },
           `/tasks/${id}/history`
-        )
+        ),
+        emptyResource(null, `/tasks/${id}/jira-sync`)
       ];
 
   const sortedSessions = [...sessions.data].sort((left, right) =>
@@ -160,7 +189,7 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
                 taskId={task.data.id}
                 planId={task.data.plan_id}
                 projectId={plan.data?.project_id}
-                disabled={task.data.status !== "pending"}
+                disabled={!['pending', 'ready_for_dispatch'].includes(task.data.status)}
               />
             ) : null}
           </div>
@@ -168,11 +197,31 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
       />
 
       <ResourceNotice
-        resources={[task, plan, planTasks, dependencies, sessions, runs, taskHistory, sessionEvents, taskMemory]}
+        resources={[task, plan, planTasks, dependencies, sessions, runs, taskHistory, sessionEvents, taskMemory, jiraSync]}
       />
+
+      <nav aria-label="Task workbench" className="overflow-x-auto border-b border-[rgb(var(--line))]">
+        <div className="flex min-w-max gap-1">
+          {workbenchTabs.map((tab) => (
+            <Link
+              key={tab}
+              href={`/tasks/${id}?tab=${tab}`}
+              aria-current={activeTab === tab ? "page" : undefined}
+              className={
+                activeTab === tab
+                  ? "border-b-2 border-[rgb(var(--accent))] px-4 py-3 text-sm font-semibold text-[rgb(var(--ink-strong))]"
+                  : "border-b-2 border-transparent px-4 py-3 text-sm text-[rgb(var(--ink-soft))] transition hover:text-[rgb(var(--ink-strong))]"
+              }
+            >
+              {tab[0].toUpperCase() + tab.slice(1)}
+            </Link>
+          ))}
+        </div>
+      </nav>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="space-y-6">
+          <WorkbenchPanel active="summary" current={activeTab}>
           <SectionPanel
             title="Task overview"
             description="Core execution metadata for this task."
@@ -219,7 +268,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               ]}
             />
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="summary" current={activeTab}>
           <SectionPanel
             title="Instructions"
             description="Execution brief passed to the worker."
@@ -230,7 +281,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               </p>
             </div>
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="decision" current={activeTab}>
           <SectionPanel
             title="Dispatch evaluation"
             description="Invoke the control-plane evaluator to inspect readiness, policy gates, risk, and missing context."
@@ -243,16 +296,25 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               />
             ) : null}
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="decision" current={activeTab}>
           <SectionPanel
             title="Selective autonomy"
-            description="Operator-first decision context for why this task was auto-cleared, held, or escalated, with temporary override controls."
+            description="Operator-first decision context for why this task was auto-cleared, held, or escalated, with persisted override controls."
           >
             {autonomySnapshot ? (
-              <TaskControlTower snapshot={autonomySnapshot} timeline={autonomyTimeline} />
+              <TaskControlTower
+                snapshot={autonomySnapshot}
+                timeline={autonomyTimeline}
+                planId={task.data?.plan_id}
+                projectId={plan.data?.project_id}
+              />
             ) : null}
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="execution" current={activeTab}>
           <SectionPanel
             title="Autonomous execution"
             description="Timeline and graph views for retries, task chains, follow-up creation, and escalation points."
@@ -268,7 +330,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               />
             ) : null}
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="execution" current={activeTab}>
           <SectionPanel
             title="Execution runs"
             description="Attempts linked to this task across one or more sessions."
@@ -279,7 +343,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               emptyBody="Execution attempts will populate after the worker claims and finalizes the task."
             />
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="history" current={activeTab}>
           <SectionPanel
             title="Session logs"
             description="Latest session event history rendered as collapsible payload logs."
@@ -290,9 +356,11 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               emptyBody="Session-level logs will appear once the API layer exposes event history for the latest task session."
             />
           </SectionPanel>
+          </WorkbenchPanel>
         </div>
 
         <div className="space-y-6">
+          <WorkbenchPanel active="memory" current={activeTab}>
           <SectionPanel
             title="Task memory"
             description="Curated task summary, important decisions, and bug patterns carried forward into future execution."
@@ -302,7 +370,32 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               <TaskMemoryPanel taskMemory={taskMemory.data} />
             </div>
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="summary" current={activeTab}>
+          <SectionPanel
+            title="Jira ticket"
+            description="Create one external ticket only after the plan is approved. Retry uses the durable mapping rather than creating duplicates."
+          >
+            {task.data ? (
+              <JiraSyncPanel
+                taskId={task.data.id}
+                planId={task.data.plan_id}
+                projectId={plan.data?.project_id}
+                initialSync={jiraSync.data}
+              />
+            ) : null}
+            {task.data ? (
+              <TaskOperatorActions
+                taskId={task.data.id}
+                planId={task.data.plan_id}
+                projectId={plan.data?.project_id}
+              />
+            ) : null}
+          </SectionPanel>
+          </WorkbenchPanel>
+
+          <WorkbenchPanel active="evidence" current={activeTab}>
           <SectionPanel
             title="Input payload"
             description="Structured input passed into execution for this task."
@@ -313,7 +406,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               </pre>
             </CollapsibleLog>
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="summary" current={activeTab}>
           <SectionPanel
             title="Task relationships"
             description="Dependencies, parent links, follow-ups, and chained tasks connected to this task."
@@ -348,7 +443,9 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               </ul>
             )}
           </SectionPanel>
+          </WorkbenchPanel>
 
+          <WorkbenchPanel active="execution" current={activeTab}>
           <SectionPanel
             title="Task sessions"
             description="Logical session threads created for this task."
@@ -385,6 +482,7 @@ export default async function TaskDetailPage({ params }: TaskDetailPageProps) {
               </div>
             )}
           </SectionPanel>
+          </WorkbenchPanel>
         </div>
       </div>
     </div>

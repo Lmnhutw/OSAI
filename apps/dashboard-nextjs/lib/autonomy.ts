@@ -210,15 +210,6 @@ export interface DerivedAutonomySnapshot {
   evaluatedAt: string | null;
 }
 
-export interface OperatorOverrideState {
-  forceManualReview: boolean;
-  forceAuto: boolean;
-  disableRetries: boolean;
-  markSensitive: boolean;
-  blockExecution: boolean;
-  appliedAt: string;
-}
-
 export interface AutonomyControlTimelineItem {
   id: string;
   kind: "decision" | "contract" | "policy" | "override" | "escalation" | "history";
@@ -811,110 +802,6 @@ export function buildTaskAutonomySnapshot(task: Task, history: TaskHistory, task
     contract,
     evaluatedAt
   } satisfies DerivedAutonomySnapshot;
-}
-
-export function applyOperatorOverride(
-  snapshot: DerivedAutonomySnapshot,
-  override: OperatorOverrideState | null
-) {
-  if (!override) {
-    return snapshot;
-  }
-
-  const next: DerivedAutonomySnapshot = {
-    ...snapshot,
-    sensitiveScopeFlags: [...snapshot.sensitiveScopeFlags],
-    allowedActions: [...snapshot.allowedActions],
-    policyReasonCodes: [...snapshot.policyReasonCodes],
-    contributingFactors: [...snapshot.contributingFactors],
-    contract: {
-      ...snapshot.contract,
-      allowedActions: [...snapshot.contract.allowedActions]
-    }
-  };
-
-  const notes: string[] = [];
-
-  if (override.markSensitive && !next.sensitiveScopeFlags.includes("Operator marked sensitive")) {
-    next.sensitiveScopeFlags.push("Operator marked sensitive");
-    notes.push("Operator marked this task as sensitive for the current browser session.");
-  }
-
-  if (override.disableRetries) {
-    next.contract.retryLimit = 0;
-    next.allowedActions = next.allowedActions.filter((action) => !action.toLowerCase().includes("retry"));
-    next.contract.allowedActions = next.contract.allowedActions.filter(
-      (action) => !action.toLowerCase().includes("retry")
-    );
-    notes.push("Retries are temporarily disabled by the operator.");
-  }
-
-  if (override.forceManualReview) {
-    next.mode = "review_required";
-    next.reviewRequired = true;
-    next.autoExecutable = false;
-    next.allowedActions = next.allowedActions.filter((action) => action !== "Auto execute");
-    next.contract.executionMode = "Operator review hold";
-    next.contract.approvalStatus = "Awaiting operator review";
-    notes.push("Operator forced a manual review checkpoint.");
-  }
-
-  if (override.forceAuto && !next.blockedByPolicy && !next.approvalRequired) {
-    next.mode = "auto_execute";
-    next.reviewRequired = false;
-    next.qaRequired = false;
-    next.autoExecutable = true;
-    if (!next.allowedActions.includes("Auto execute")) {
-      next.allowedActions.unshift("Auto execute");
-    }
-    if (!next.contract.allowedActions.includes("Auto execute")) {
-      next.contract.allowedActions.unshift("Auto execute");
-    }
-    next.contract.executionMode = "Operator-forced autonomy";
-    next.contract.approvalStatus = "Cleared by operator";
-    notes.push("Operator forced auto mode within the current policy allowance.");
-  }
-
-  if (override.blockExecution) {
-    next.mode = "blocked";
-    next.blockedByPolicy = true;
-    next.autoExecutable = false;
-    next.contract.executionMode = "Operator block";
-    next.contract.retryLimit = 0;
-    next.contract.approvalStatus = "Blocked by operator";
-    next.allowedActions = ["Manual intervention only"];
-    next.contract.allowedActions = ["Manual intervention only"];
-    notes.push("Operator blocked execution pending further review.");
-  }
-
-  if (notes.length > 0) {
-    next.decisionSummary = `${next.decisionSummary} ${notes.join(" ")}`;
-    next.contributingFactors = uniqueStrings([...notes, ...next.contributingFactors]).slice(0, 8);
-  }
-
-  return next;
-}
-
-export function buildOverrideTimelineItem(override: OperatorOverrideState, snapshot: DerivedAutonomySnapshot) {
-  const actions = [
-    override.forceManualReview ? "manual review" : null,
-    override.forceAuto ? "force auto mode" : null,
-    override.disableRetries ? "disable retries" : null,
-    override.markSensitive ? "mark sensitive" : null,
-    override.blockExecution ? "block execution" : null
-  ]
-    .filter(Boolean)
-    .join(", ");
-
-  return {
-    id: `override-${override.appliedAt}`,
-    kind: "override",
-    title: "Temporary override applied",
-    description: `The operator staged a temporary browser-local override to ${actions || "adjust the autonomy contract"}.`,
-    status: snapshot.mode === "blocked" ? "blocked" : "review_required",
-    time: override.appliedAt,
-    href: undefined
-  } satisfies AutonomyControlTimelineItem;
 }
 
 export function buildAutonomyControlTimeline(

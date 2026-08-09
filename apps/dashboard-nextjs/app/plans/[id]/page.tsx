@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
-import { PlanApprovalForm } from "@/components/approval-forms";
+import { PlanApprovalDecisionForm } from "@/components/approval-forms";
+import { PlanTaskGenerationForm } from "@/components/generation-forms";
 import { EmptyState } from "@/components/empty-state";
 import { KeyValueGrid } from "@/components/key-value-grid";
 import { PageHeader } from "@/components/page-header";
@@ -53,6 +54,7 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
   const sortedApprovals = [...approvals.data].sort((left, right) =>
     right.requested_at.localeCompare(left.requested_at)
   );
+  const pendingApproval = sortedApprovals.find((approval) => approval.status === "pending");
 
   return (
     <div className="space-y-6">
@@ -66,12 +68,16 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
         actions={
           <div className="flex flex-wrap items-center gap-3">
             {plan.data ? <StatusBadge status={plan.data.status} /> : null}
-            {plan.data ? (
-              <PlanApprovalForm
+            {plan.data && pendingApproval ? (
+              <PlanApprovalDecisionForm
+                approvalId={pendingApproval.id}
                 planId={plan.data.id}
                 projectId={plan.data.project_id}
-                disabled={["approved", "completed"].includes(plan.data.status)}
+                expectedPlanUpdatedAt={plan.data.updated_at}
               />
+            ) : null}
+            {plan.data && plan.data.status === "approved" && tasks.data.length === 0 ? (
+              <PlanTaskGenerationForm planId={plan.data.id} projectId={plan.data.project_id} />
             ) : null}
           </div>
         }
@@ -142,7 +148,7 @@ export default async function PlanDetailPage({ params }: PlanDetailPageProps) {
         <div className="space-y-6">
           <SectionPanel
             title="Approval history"
-            description="Simple approval flow backed by the existing control-plane route."
+            description="Operator decisions are persisted with an actor, concurrency check, and idempotency key."
           >
             {sortedApprovals.length === 0 ? (
               <EmptyState

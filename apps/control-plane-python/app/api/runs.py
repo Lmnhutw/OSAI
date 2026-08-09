@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
-from typing import List
+from typing import List, Optional
 import uuid
 
 from ..models import ExecutionRun, Event
@@ -9,6 +9,27 @@ from ..schemas import EventRead, ExecutionRunRead, ResultEvaluationRead
 from ..services.result_evaluator import evaluate_run_result
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+@router.get("", response_model=List[ExecutionRunRead])
+def list_runs(
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    status: Optional[str] = Query(default=None, max_length=80),
+    sort_by: str = Query(default="created_at", pattern="^(created_at|started_at|attempt_no)$"),
+    sort_direction: str = Query(default="desc", pattern="^(asc|desc)$"),
+    session: Session = Depends(get_session),
+):
+    statement = select(ExecutionRun)
+    if status:
+        statement = statement.where(ExecutionRun.status == status)
+    sort_column = {
+        "created_at": ExecutionRun.created_at,
+        "started_at": ExecutionRun.started_at,
+        "attempt_no": ExecutionRun.attempt_no,
+    }[sort_by]
+    ordering = sort_column.asc() if sort_direction == "asc" else sort_column.desc()
+    return session.exec(statement.order_by(ordering).offset(offset).limit(limit)).all()
 
 
 @router.get("/{run_id}", response_model=ExecutionRunRead)

@@ -62,12 +62,12 @@ class TaskDependency(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 class TaskRelationship(SQLModel, table=True):
-    __tablename__ = "task_relationships"
+    __tablename__ = "task_links"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     parent_task_id: uuid.UUID = Field(foreign_key="tasks.id")
     child_task_id: uuid.UUID = Field(foreign_key="tasks.id")
-    relationship_type: str = Field(default="follow_up", sa_type=Text)
+    relationship_type: str = Field(default="follow_up", sa_column=Column("link_type", Text))
     relationship_metadata: Dict[str, Any] = Field(default_factory=dict, sa_column=Column("metadata", JSON))
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
@@ -95,7 +95,7 @@ class TaskLoop(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 class TaskLoopHistory(SQLModel, table=True):
-    __tablename__ = "task_loop_history"
+    __tablename__ = "task_history"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     task_loop_id: Optional[uuid.UUID] = Field(default=None, foreign_key="task_loops.id")
@@ -111,7 +111,7 @@ class TaskLoopHistory(SQLModel, table=True):
     chain_depth: int = Field(default=0, sa_type=Integer)
     summary: Optional[str] = Field(default=None, sa_type=Text)
     payload: Dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
-    created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
+    created_at: datetime = Field(default_factory=utcnow, sa_column=Column("timestamp", DateTime(timezone=True)))
 
 class Approval(SQLModel, table=True):
     __tablename__ = "approvals"
@@ -124,17 +124,21 @@ class Approval(SQLModel, table=True):
     decision_note: Optional[str] = Field(default=None, sa_type=Text)
     requested_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     decided_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+    expected_plan_updated_at: Optional[datetime] = Field(default=None, sa_type=DateTime(timezone=True))
+    idempotency_key: Optional[str] = Field(default=None, sa_type=Text)
+    decision_idempotency_key: Optional[str] = Field(default=None, sa_type=Text)
+    decision_version: int = Field(default=1, sa_type=Integer)
     created_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
     updated_at: datetime = Field(default_factory=utcnow, sa_type=DateTime(timezone=True))
 
 class AutonomyOverride(SQLModel, table=True):
-    __tablename__ = "autonomy_overrides"
+    __tablename__ = "policy_overrides"
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     project_id: Optional[uuid.UUID] = Field(default=None, foreign_key="projects.id")
     task_id: Optional[uuid.UUID] = Field(default=None, foreign_key="tasks.id")
     scope: str = Field(default="task", sa_type=Text)
-    operator: str = Field(sa_type=Text)
+    operator: str = Field(sa_column=Column("created_by", Text))
     reason: Optional[str] = Field(default=None, sa_type=Text)
     status: str = Field(default="active", sa_type=Text)
     force_autonomy_mode: Optional[str] = Field(default=None, sa_type=Text)

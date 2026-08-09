@@ -12,6 +12,89 @@ export interface HealthStatus {
   status: string;
 }
 
+export interface ModelProfileStatus {
+  profile: string;
+  configured: boolean;
+  provider: string | null;
+  model: string | null;
+  base_url: string | null;
+  error: string | null;
+}
+
+export interface AgentRun {
+  id: string;
+  workflow_run_id: string | null;
+  project_id: string;
+  plan_id: string | null;
+  task_id: string | null;
+  agent_key: string;
+  model_profile: string;
+  status: string;
+  correlation_id: string;
+  error_code: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OperatorQueueItem {
+  item_type: "plan_approval" | "task_attention";
+  status: string;
+  title: string;
+  project_id: string;
+  plan_id: string | null;
+  task_id: string | null;
+  approval_id: string | null;
+  requested_by: string | null;
+  created_at: string;
+}
+
+export interface OperatorQueue {
+  items: OperatorQueueItem[];
+  total: number;
+  limit: number;
+}
+
+export interface JiraSync {
+  id: string;
+  task_id: string;
+  project_id: string;
+  sync_status: string;
+  external_issue_key: string | null;
+  external_issue_url: string | null;
+  error_message: string | null;
+  attempt_count: number;
+  last_attempt_at: string | null;
+  synchronized_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutonomyOverrideInput {
+  reason: string;
+  force_autonomy_mode?: "auto_execute" | "review_required" | "blocked";
+  force_review?: boolean;
+  disable_retries?: boolean;
+  sensitive_modules?: string[];
+}
+
+export interface SearchItem {
+  resource_type: "project" | "plan" | "task";
+  resource_id: string;
+  project_id: string | null;
+  plan_id: string | null;
+  title: string;
+  subtitle: string | null;
+  status: string | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  items: SearchItem[];
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -339,6 +422,13 @@ export interface TaskHistory {
 export interface ApprovalInput {
   requested_by: string;
   decision_note?: string;
+}
+
+export interface ApprovalDecisionInput {
+  decision: "approved" | "rejected" | "changes_requested";
+  decision_note?: string;
+  expected_plan_updated_at?: string;
+  idempotency_key: string;
 }
 
 export interface BatchTaskApproveInput {
